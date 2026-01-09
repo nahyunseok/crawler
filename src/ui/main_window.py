@@ -89,6 +89,17 @@ class MainWindow(ctk.CTk):
         self.scope_entry = ctk.CTkEntry(self.scope_frame, placeholder_text="예: #content 또는 .gallery-grid", width=300)
         # self.scope_entry.pack(side="left", padx=10) # Packed properly in toggle function
 
+        # Depth Settings (PRO Feature)
+        self.depth_frame = ctk.CTkFrame(self.settings_frame, fg_color="transparent")
+        self.depth_frame.pack(fill="x", padx=10, pady=(0, 5))
+        
+        self.depth_label = ctk.CTkLabel(self.depth_frame, text="크롤링 깊이:")
+        self.depth_label.pack(side="left", padx=(5, 10))
+        
+        self.depth_var = ctk.StringVar(value="1단계 (현재)")
+        self.depth_segment = ctk.CTkSegmentedButton(self.depth_frame, values=["1단계 (현재)", "2단계 (링크)"], variable=self.depth_var)
+        self.depth_segment.pack(side="left")
+
         # --- Log Console ---
         self.log_frame = ctk.CTkFrame(self, fg_color="transparent")
         self.log_frame.grid(row=1, column=1, padx=20, pady=(0, 20), sticky="nsew")
@@ -171,7 +182,14 @@ class MainWindow(ctk.CTk):
             # Get Scope Selector
             target_selector = self.scope_entry.get() if self.scope_var.get() else None
             
-            images = crawler.crawl(url, target_selector=target_selector, progress_callback=progress_callback)
+            # Get Depth
+            depth_str = self.depth_var.get()
+            max_depth = 2 if "2단계" in depth_str else 1
+            
+            if max_depth > 1:
+                self.after(0, lambda: self.append_log(f"딥 크롤링 시작 (깊이: {max_depth}). 시간이 더 소요됩니다."))
+
+            images = crawler.crawl(url, target_selector=target_selector, max_depth=max_depth, progress_callback=progress_callback)
             
             if not images:
                 self.after(0, lambda: self.append_log("이미지를 찾을 수 없거나 수집에 실패했습니다."))

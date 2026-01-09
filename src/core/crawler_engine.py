@@ -44,14 +44,55 @@ class CrawlerEngine:
             self.logger.error(f"Failed to initialize WebDriver: {e}")
             raise
 
-    def crawl(self, url, target_selector=None, progress_callback=None):
+    def crawl(self, start_url, target_selector=None, max_depth=1, progress_callback=None):
         """
-        Crawls the given URL and extracts image data.
-        Returns a list of dictionaries: {'src': url, 'alt': text, 'title': text, 'page_url': url}
+        Orchestrator for recursive crawling.
         """
         if not self.driver:
             self.setup_driver()
 
+        visited_urls = set()
+        queue = [(start_url, 1)] # (url, current_depth)
+        all_images = []
+        
+        base_domain = urlparse(start_url).netloc
+
+        try:
+            while queue:
+                current_url, current_depth = queue.pop(0)
+                
+                if current_url in visited_urls:
+                    continue
+                visited_urls.add(current_url)
+                
+                if progress_callback:
+                    progress_callback(f"이동 중: {current_url} (깊이 {current_depth}/{max_depth})")
+
+                # Process the page
+                images, found_links = self._process_page(current_url, target_selector, progress_callback)
+                all_images.extend(images)
+                
+                # Queue next level links
+                if current_depth < max_depth:
+                    for link in found_links:
+                        # Simple domain filter to prevent leaving the site
+                        if urlparse(link).netloc == base_domain and link not in visited_urls:
+                            queue.append((link, current_depth + 1))
+            
+            self.logger.info(f"Total images found: {len(all_images)} from {len(visited_urls)} pages.")
+            return all_images
+            
+        except Exception as e:
+            self.logger.error(f"Crawl orchestrator error: {e}")
+            return all_images
+        finally:
+            self.close()
+
+    def _process_page(self, url, target_selector, progress_callback):
+        """
+        Process a single page: Navigate -> Scroll -> Extract Images -> Extract Links
+        Returns: (images_list, links_list)
+        """
         try:
             self.logger.info(f"Navigating to {url}...")
             self.driver.get(url)
@@ -79,6 +120,7 @@ class CrawlerEngine:
                 else:
                     self.logger.warning(f"Target selector '{target_selector}' not found. Searching entire page.")
             
+            # Extract Images
             images = []
             img_tags = search_area.find_all('img')
             
@@ -137,14 +179,20 @@ class CrawlerEngine:
                 }
                 images.append(image_data)
                 
-            self.logger.info(f"Found {len(images)} images.")
-            return images
+            # Extract Links for recursion
+            links = []
+            a_tags = soup.find_all('a', href=True)
+            for a in a_tags:
+                href = a['href']
+                abs_link = urljoin(url, href)
+                links.append(abs_link)
+                
+            self.logger.info(f"Found {len(images)} images and {len(links)} links on {url}")
+            return images, links
 
         except Exception as e:
-            self.logger.error(f"Crawling failed: {e}")
-            return []
-        finally:
-            self.close()
+            self.logger.error(f"Page processing failed: {e}")
+            return [], []
 
     def auto_scroll(self, callback=None):
         """Scrolls down to trigger lazy loading."""

@@ -1,7 +1,9 @@
 import os
+import time
 import requests
 import pandas as pd
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from PIL import Image
 from io import BytesIO
 from urllib.parse import urlparse
@@ -40,28 +42,46 @@ class ImageDownloader:
         os.makedirs(img_save_dir, exist_ok=True)
         
         self.logger.info(f"Saving results to {save_dir}")
+        self.logger.info(f"Starting parallel download for {len(images_data)} images...")
         
         downloaded_images = []
         
-        # Download Loop
-        for idx, img in enumerate(images_data):
+        # PRO Feature: Parallel Downloading (5 workers)
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            future_to_img = {
+                executor.submit(self._download_single_image, img, idx, img_save_dir): img 
+                for idx, img in enumerate(images_data)
+            }
+            
+            for future in as_completed(future_to_img):
+                result = future.result()
+                if result:
+                    downloaded_images.append(result)
+                
+        # Generate Excel Report
+        self.create_report(downloaded_images, save_dir)
+        return save_dir
+
+    def _download_single_image(self, img, idx, save_dir):
+        """Downloads a single image with retry logic (PRO Feature)."""
+        url = img['src']
+        filename = f"{idx+1:03d}_{img['filename']}"
+        filepath = os.path.join(save_dir, filename)
+        
+        # PRO Feature: Smart Retry with Exponential Backoff
+        max_retries = 3
+        
+        for attempt in range(max_retries):
             try:
-                url = img['src']
-                filename = f"{idx+1:03d}_{img['filename']}" # Add index prefix to keep order/uniqueness
-                filepath = os.path.join(img_save_dir, filename)
-                
-                # Check filters before full download if possible (head request), 
-                # but often just downloading chunks is safer for compatibility.
-                
-                # Use headers to mimic browser and bypass 403 checks
+                # Mimic browser headers
                 headers = {
                     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
                     'Referer': img['source_page']
                 }
                 
                 response = requests.get(url, headers=headers, stream=True, timeout=10)
+                
                 if response.status_code == 200:
-                    # Filter by size using PIL
                     image_content = response.content
                     image = Image.open(BytesIO(image_content))
                     
@@ -70,40 +90,43 @@ class ImageDownloader:
                     
                     if image.width < min_width or image.height < min_height:
                         self.logger.info(f"Skipped {filename}: Too small ({image.width}x{image.height})")
-                        continue
+                        return None
                         
                     # Save image
                     with open(filepath, 'wb') as f:
                         f.write(image_content)
                     
-                    # Save Text Data (.txt) alongside image
+                    # Save Text Data (.txt)
                     txt_filename = os.path.splitext(filename)[0] + ".txt"
-                    txt_filepath = os.path.join(img_save_dir, txt_filename)
+                    txt_filepath = os.path.join(save_dir, txt_filename)
                     try:
                         with open(txt_filepath, "w", encoding="utf-8") as f:
                             f.write(f"파일이름: {filename}\n")
-                            f.write(f"출처링크: {img['src']}\n")
+                            f.write(f"출처링크: {url}\n")
                             f.write(f"이미지설명: {img.get('description', '없음')}\n")
                             f.write(f"----------------------------------------\n")
                             f.write(f"[주변 텍스트 문맥]\n")
                             f.write(f"{img.get('context', '없음')}\n")
                     except Exception as e:
-                        self.logger.warning(f"Failed to save text file for {filename}: {e}")
-                        
-                    # Update data for report
+                        pass # Text save failure shouldn't stop flow
+
+                    # Update metadata
                     img['saved_filename'] = filename
                     img['resolution'] = f"{image.width}x{image.height}"
-                    downloaded_images.append(img)
                     self.logger.info(f"Downloaded: {filename}")
+                    return img
+                    
                 else:
-                    self.logger.warning(f"Failed to download {url}: Status {response.status_code}")
+                    self.logger.warning(f"Failed {filename} (Attempt {attempt+1}/{max_retries}): Status {response.status_code}")
                     
             except Exception as e:
-                self.logger.error(f"Error downloading {img['src']}: {e}")
-                
-        # Generate Excel Report
-        self.create_report(downloaded_images, save_dir)
-        return save_dir
+                self.logger.error(f"Error {filename} (Attempt {attempt+1}/{max_retries}): {e}")
+            
+            # Backoff before retry (1s, 2s, 4s...)
+            if attempt < max_retries - 1:
+                time.sleep(2 ** attempt)
+        
+        return None
 
     def create_report(self, images_data, output_dir):
         """Creates an Excel report from value data."""
