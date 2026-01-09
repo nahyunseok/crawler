@@ -1,0 +1,16 @@
+{
+    "min_width": 100,
+    "min_height": 100,
+    "allowed_extensions": [
+        ".jpg",
+        ".jpeg",
+        ".png",
+        ".webp"
+    ],
+    "headless": true,
+    "timeout": 30,
+    "max_scrolls": 0,
+    "user_agent_rotation": true,
+    "random_delay_min": 1,
+    "random_delay_max": 3
+}

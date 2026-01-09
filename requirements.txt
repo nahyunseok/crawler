@@ -1,0 +1,10 @@
+customtkinter
+selenium
+webdriver-manager
+beautifulsoup4
+pandas
+openpyxl
+requests
+Pillow
+python-dotenv
+appdirs
