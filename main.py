@@ -7,6 +7,15 @@ import customtkinter as ctk
 from src.utils.logger import setup_logger
 import tkinter as tk
 
+def resource_path(relative_path):
+    """ Get absolute path to resource, works for dev and for PyInstaller """
+    try:
+        # PyInstaller creates a temp folder and stores path in _MEIPASS
+        base_path = sys._MEIPASS
+    except Exception:
+        base_path = os.path.abspath(".")
+    return os.path.join(base_path, relative_path)
+
 def main():
     # Setup logging
     setup_logger()
@@ -17,6 +26,11 @@ def main():
     
     root = ctk.CTk()
     root.withdraw() # Hide the root blank window initially
+    
+    # Set the app icon
+    icon_path = resource_path("app_icon.ico")
+    if os.path.exists(icon_path):
+        root.iconbitmap(icon_path)
     
     lm = LicenseManager()
     is_valid, status_msg, days = lm.get_license_status()

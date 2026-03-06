@@ -5,6 +5,15 @@ import threading
 import tkinter as tk
 import os
 
+import sys
+
+def resource_path(relative_path):
+    try:
+        base_path = sys._MEIPASS
+    except Exception:
+        base_path = os.path.abspath(".")
+    return os.path.join(base_path, relative_path)
+
 class MainWindow(ctk.CTk):
     def __init__(self, license_manager):
         super().__init__()
@@ -18,6 +27,10 @@ class MainWindow(ctk.CTk):
         # Window Setup
         self.title("Gemini Image Crawler")
         self.geometry("900x700")
+        
+        icon_path = resource_path("app_icon.ico")
+        if os.path.exists(icon_path):
+            self.iconbitmap(icon_path)
         
         # Grid Configuration
         self.grid_columnconfigure(1, weight=1)

@@ -1,5 +1,14 @@
 import customtkinter as ctk
 import tkinter.messagebox as messagebox
+import sys
+import os
+
+def resource_path(relative_path):
+    try:
+        base_path = sys._MEIPASS
+    except Exception:
+        base_path = os.path.abspath(".")
+    return os.path.join(base_path, relative_path)
 
 class LicenseWindow(ctk.CTkToplevel):
     def __init__(self, parent, license_manager, on_success_callback):
@@ -11,6 +20,10 @@ class LicenseWindow(ctk.CTkToplevel):
         self.title("Gemini Image Crawler - 라이센스 인증")
         self.geometry("400x250")
         self.resizable(False, False)
+        
+        icon_path = resource_path("app_icon.ico")
+        if os.path.exists(icon_path):
+            self.iconbitmap(icon_path)
         
         # Center the window
         self.update_idletasks()
