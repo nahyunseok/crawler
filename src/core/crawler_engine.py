@@ -269,12 +269,16 @@ class CrawlerEngine:
                     if self.has_include_keywords([image_data['description'], image_data['context'], image_data['heading']]):
                         images.append(image_data)
                     
-            # Deduplicate by URL
+            # Deduplicate by URL (stripping query parameters for accurate deduplication)
             seen_urls = set()
             unique_images = []
             for img in images:
-                if img['src'] not in seen_urls:
-                    seen_urls.add(img['src'])
+                # Normalize url by removing fragments and queries
+                parsed = urlparse(img['src'])
+                clean_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+                
+                if clean_url not in seen_urls:
+                    seen_urls.add(clean_url)
                     unique_images.append(img)
             images = unique_images
                 
@@ -398,17 +402,34 @@ class CrawlerEngine:
         return False
 
     def get_filename_from_url(self, url):
-        """Extracts filename from URL."""
+        """Extracts filename from URL and sanitizes it to prevent Unicode/latin-1 console logging errors."""
         path = urlparse(url).path
-        name = os.path.basename(path)
-        if not name or '.' not in name:
-            name = f"image_{int(time.time())}.jpg"
-        return name
+        filename = os.path.basename(path)
+        if not filename or filename == "/":
+            filename = f"image_{int(time.time())}.jpg"
+            
+        import re
+        # Sanitize filename: allow only alphanumeric, dash, dot, and underscore
+        # This prevents 'latin-1' codec errors when logging on Windows terminals
+        clean_filename = re.sub(r'[^a-zA-Z0-9_\-\.]', '', filename)
+        
+        # If it stripped everything (e.g., Arabic-only filename), generate a fallback
+        if not clean_filename or clean_filename.startswith('.'):
+            clean_filename = f"image_{int(time.time())}.jpg"
+            
+        # Ensure it has an extension (default to jpg if unknown)
+        if not any(clean_filename.lower().endswith(ext) for ext in ['.jpg', '.jpeg', '.png', '.webp', '.gif']):
+            clean_filename += ".jpg"
+            
+        return clean_filename
 
     def close(self):
         if self.driver:
             try:
                 self.driver.quit()
+            except OSError as e:
+                # undetected_chromedriver often throws "[WinError 6] The handle is invalid" on Windows shutdown.
+                self.logger.debug(f"Expected OSError during driver quit: {e}")
             except Exception as e:
                 self.logger.warning(f"Error while quitting driver: {e}")
             finally:
