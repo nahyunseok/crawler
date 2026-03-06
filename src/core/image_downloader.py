@@ -58,7 +58,7 @@ class ImageDownloader:
         if not safe_title:
             safe_title = "Untitled"
 
-        hostname = urlparse(first_source).netloc.replace('www.', '')
+        hostname = urlparse(first_source).netloc.replace('www.', '').replace(':', '_')
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         
         # New Format: [Title]_[Domain]_[Time] e.g. "iPhone15Pro_apple.com_20240101..."

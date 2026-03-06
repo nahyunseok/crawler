@@ -24,7 +24,14 @@ class MainWindow(ctk.CTk):
         self.grid_rowconfigure(0, weight=0) # Header/Input
         self.grid_rowconfigure(1, weight=1) # Main Content (Log/Results)
         
+        self.protocol("WM_DELETE_WINDOW", self.on_closing)
+        
         self.create_widgets()
+        
+    def on_closing(self):
+        """Called when the user clicks the 'X' button to close the window."""
+        self.stop_event.set() # Stop any running threads cleanly
+        self.destroy()
         
     def create_widgets(self):
         # --- Sidebar ---
