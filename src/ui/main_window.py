@@ -139,6 +139,16 @@ class MainWindow(ctk.CTk):
         self.exclude_entry.insert(0, self.config_manager.get("exclude_keywords", "logo, icon, button, tracker, pixel, banner"))
         self.exclude_entry.pack(side="left", padx=5)
         self.exclude_entry.bind("<FocusOut>", self.save_settings)
+        
+        self.filter_row3 = ctk.CTkFrame(tab_filter, fg_color="transparent")
+        self.filter_row3.pack(fill="x", padx=5, pady=5)
+        
+        self.include_label = ctk.CTkLabel(self.filter_row3, text="필수 포함 키워드:")
+        self.include_label.pack(side="left", padx=5)
+        self.include_entry = ctk.CTkEntry(self.filter_row3, placeholder_text="예: 풍경, 사람, 리뷰 (비워두면 모두 수집)", width=320)
+        self.include_entry.insert(0, self.config_manager.get("include_keywords", ""))
+        self.include_entry.pack(side="left", padx=5)
+        self.include_entry.bind("<FocusOut>", self.save_settings)
 
         # --- Tab 3: Auth & Paging ---
         self.auth_row1 = ctk.CTkFrame(tab_auth, fg_color="transparent")
@@ -234,6 +244,7 @@ class MainWindow(ctk.CTk):
             self.config_manager.set("ext_webp", self.ext_webp.get())
             self.config_manager.set("ext_gif", self.ext_gif.get())
             self.config_manager.set("exclude_keywords", self.exclude_entry.get())
+            self.config_manager.set("include_keywords", self.include_entry.get())
             
             self.config_manager.set("manual_login", self.login_var.get())
             wait_val = self.login_wait_entry.get()

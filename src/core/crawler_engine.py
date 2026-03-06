@@ -218,7 +218,9 @@ class CrawlerEngine:
                     'source_page': url,
                     'page_title': page_title
                 }
-                images.append(image_data)
+                
+                if self.has_include_keywords([image_data['description'], image_data['context'], image_data['heading']]):
+                    images.append(image_data)
                 
             # --- Picture Source Extraction (Modern HTML) ---
             source_tags = search_area.find_all('source')
@@ -239,7 +241,8 @@ class CrawlerEngine:
                             'source_page': url,
                             'page_title': page_title
                         }
-                        images.append(image_data)
+                        if self.has_include_keywords([image_data['description'], image_data['context'], image_data['heading']]):
+                            images.append(image_data)
                 
             # --- CSS Background Image Extraction (PRO Feature) ---
             elements_with_bg = search_area.find_all(style=lambda value: value and 'background-image' in value)
@@ -263,7 +266,8 @@ class CrawlerEngine:
                         'source_page': url,
                         'page_title': page_title
                     }
-                    images.append(image_data)
+                    if self.has_include_keywords([image_data['description'], image_data['context'], image_data['heading']]):
+                        images.append(image_data)
                     
             # Deduplicate by URL
             seen_urls = set()
@@ -373,6 +377,23 @@ class CrawlerEngine:
             if any(path.endswith(ext) for ext in known_img_exts):
                 if not any(path.endswith(ext) for ext in valid_exts):
                     return True # Excluded extension
+                
+        return False
+
+    def has_include_keywords(self, text_elements):
+        """Checks if any extracted text contains the 'Must Include' keywords from UI."""
+        kws_str = self.config.get("include_keywords", "").strip()
+        if not kws_str:
+            return True # Feature unused, allow all
+            
+        kws = [kw.strip().lower() for kw in kws_str.split(',') if kw.strip()]
+        if not kws:
+            return True 
+            
+        combined_text = " ".join([str(t) for t in text_elements if t]).lower()
+        for kw in kws:
+            if kw in combined_text:
+                return True
                 
         return False
 
