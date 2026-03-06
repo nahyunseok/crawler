@@ -11,6 +11,16 @@
     "timeout": 30,
     "max_scrolls": 0,
     "user_agent_rotation": true,
-    "random_delay_min": 1,
-    "random_delay_max": 3
+    "random_delay_min": 1.0,
+    "random_delay_max": 2.0,
+    "delay_level": 2.0,
+    "ext_jpg": true,
+    "ext_png": true,
+    "ext_webp": true,
+    "ext_gif": false,
+    "exclude_keywords": "logo, icon, button, tracker, pixel, banner",
+    "manual_login": false,
+    "login_wait": 30,
+    "use_pagination": true,
+    "pagination_selector": ""
 }
