@@ -322,8 +322,10 @@ class MainWindow(ctk.CTk):
             
         if not url.startswith(('http://', 'https://')):
             url = 'https://' + url
-            self.after(0, lambda: self.url_entry.delete(0, 'end'))
-            self.after(0, lambda: self.url_entry.insert(0, url))
+            def update_url():
+                self.url_entry.delete(0, 'end')
+                self.url_entry.insert(0, url)
+            self.after(0, update_url)
 
         try:
             # 1. Initialize Engine
@@ -397,7 +399,6 @@ class MainWindow(ctk.CTk):
         self.append_log("--- 작업 종료 ---")
 
     def show_success_dialog(self, path):
-        import subprocess
         # Open folder in Explorer
         try:
             os.startfile(path)

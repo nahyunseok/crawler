@@ -1,6 +1,7 @@
 import time
 import os
 import random
+import re
 import traceback
 from urllib.parse import urljoin, urlparse
 import undetected_chromedriver as uc
@@ -248,7 +249,6 @@ class CrawlerEngine:
             elements_with_bg = search_area.find_all(style=lambda value: value and 'background-image' in value)
             for el in elements_with_bg:
                 style = el.get('style', '')
-                import re
                 bg_urls = re.findall(r'url\([\'"]?(.*?)[\'"]?\)', style)
                 for bg_url in bg_urls:
                     abs_url = urljoin(url, bg_url)
@@ -408,7 +408,6 @@ class CrawlerEngine:
         if not filename or filename == "/":
             filename = f"image_{int(time.time())}.jpg"
             
-        import re
         # Sanitize filename: allow only alphanumeric, dash, dot, and underscore
         # This prevents 'latin-1' codec errors when logging on Windows terminals
         clean_filename = re.sub(r'[^a-zA-Z0-9_\-\.]', '', filename)

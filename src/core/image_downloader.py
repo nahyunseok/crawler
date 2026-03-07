@@ -72,7 +72,7 @@ class ImageDownloader:
         self.logger.info(f"Starting parallel download for {len(images_data)} images...")
         
         downloaded_images = []
-        total_images = len(images_data)
+        total_images = len(images_to_process)
         completed = 0
         
         # PRO Feature: Parallel Downloading (5 workers)
