@@ -63,6 +63,9 @@ def main():
             pass
         app = MainWindow(license_client, version)
         app.mainloop()
+        # 메인 윈도우가 닫히면 프로세스 완전 종료
+        # 이것이 없으면 root.mainloop() (83줄)이 파괴된 root에서 호출되어 크래시
+        sys.exit(0)
 
     def start_license_check():
         """라이선스 인증 단계 — 로컬 캐시가 유효하면 바로 메인 화면"""
