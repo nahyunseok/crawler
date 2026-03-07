@@ -175,7 +175,10 @@ class LicenseWindow(ctk.CTkToplevel):
         self.exit_btn.pack(side="right")
 
     def _load_cached_info(self):
-        """이전에 캐시된 키가 있으면 자동으로 보여주고 서버에 검증 요청"""
+        """
+        이전에 캐시된 키가 있으면 입력창에 보여주고 상태만 표시.
+        자동으로 서버 검증하지 않음 — 사용자가 다른 키로 변경할 수 있어야 하므로.
+        """
         try:
             if os.path.exists(self.client.cache_file):
                 with open(self.client.cache_file, "r", encoding="utf-8") as f:
@@ -183,11 +186,23 @@ class LicenseWindow(ctk.CTkToplevel):
                     cached_key = data.get("key", "")
                     if cached_key:
                         self.key_entry.insert(0, cached_key)
-                        self.status_label.configure(text="상태: 서버에서 정보 확인 중...", text_color="gray")
-                        # 비동기 검증 (UI 안 멈추게)
-                        threading.Thread(
-                            target=self._run_verification, args=(cached_key,), daemon=True
-                        ).start()
+                        # 로컬 캐시 정보만 표시 (서버 통신 없음)
+                        cached_result = self.client.check_local_validity()
+                        if cached_result and cached_result.get("valid"):
+                            exp_data = cached_result.get("data", {})
+                            raw_expiry = exp_data.get("expiration", "-")
+                            if "T" in raw_expiry:
+                                raw_expiry = raw_expiry.split("T")[0]
+                            self.status_label.configure(
+                                text="상태: ✅ 인증됨 (캐시)",
+                                text_color="#2ecc71"
+                            )
+                            self.expiry_label.configure(text=f"만료일: {raw_expiry}")
+                        else:
+                            self.status_label.configure(
+                                text="상태: 키가 만료되었거나 재인증이 필요합니다.",
+                                text_color="#f39c12"
+                            )
         except Exception:
             pass
 
@@ -233,13 +248,19 @@ class LicenseWindow(ctk.CTkToplevel):
         """백그라운드 스레드에서 서버 인증 수행"""
         try:
             result = self.client.verify(key)
-            # 메인 스레드에서 결과 처리 (Tkinter는 메인 스레드에서만 UI 조작 가능)
-            self.after(0, lambda: self._handle_result(result))
+            # 윈도우가 아직 살아있는 경우에만 UI 업데이트
+            if self.winfo_exists():
+                self.after(0, lambda: self._handle_result(result))
         except Exception as e:
-            self.after(0, lambda: self._handle_error(str(e)))
+            if self.winfo_exists():
+                self.after(0, lambda: self._handle_error(str(e)))
 
     def _handle_result(self, result):
         """인증 결과 처리 (메인 스레드)"""
+        # 윈도우가 이미 파괴되었으면 아무것도 하지 않음
+        if not self.winfo_exists():
+            return
+            
         # UI 다시 활성화
         self.key_entry.configure(state="normal")
         self.verify_btn.configure(state="normal")
@@ -257,6 +278,7 @@ class LicenseWindow(ctk.CTkToplevel):
             )
             self.expiry_label.configure(text=f"만료일: {raw_expiry}")
             self.failed_attempts = 0  # 성공 시 카운터 초기화
+
             
             messagebox.showinfo("성공", "인증되었습니다!\n이제 정상적으로 사용 가능합니다.", parent=self)
             
@@ -287,6 +309,8 @@ class LicenseWindow(ctk.CTkToplevel):
 
     def _handle_error(self, error_msg):
         """인증 중 예외 발생 시 처리"""
+        if not self.winfo_exists():
+            return
         self.key_entry.configure(state="normal")
         self.verify_btn.configure(state="normal")
         self.status_label.configure(text="상태: ⚠️ 오류 발생", text_color="#e74c3c")
