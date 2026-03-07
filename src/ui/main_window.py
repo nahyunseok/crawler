@@ -4,7 +4,6 @@ from src.utils.config_manager import ConfigManager
 import threading
 import tkinter as tk
 import os
-
 import sys
 
 def resource_path(relative_path):
@@ -15,17 +14,18 @@ def resource_path(relative_path):
     return os.path.join(base_path, relative_path)
 
 class MainWindow(ctk.CTk):
-    def __init__(self, license_manager):
+    def __init__(self, license_client, version="2.0.0"):
         super().__init__()
 
         self.logger = get_logger()
         self.config_manager = ConfigManager()
-        self.license_manager = license_manager
+        self.license_client = license_client  # 구글 스프레드시트 기반 라이선스 클라이언트
+        self.version = version
         
         self.stop_event = threading.Event()
         
-        # Window Setup
-        self.title("Gemini Image Crawler")
+        # Window Setup — 타이틀에 버전 정보 표시
+        self.title(f"Gemini Image Crawler v{self.version}")
         self.geometry("900x700")
         
         icon_path = resource_path("app_icon.ico")
@@ -58,14 +58,23 @@ class MainWindow(ctk.CTk):
         self.status_label = ctk.CTkLabel(self.sidebar_frame, text="상태: 준비됨", text_color="gray", font=ctk.CTkFont(size=14))
         self.status_label.grid(row=1, column=0, padx=20, pady=10)
         
-        # License status
-        is_valid, exp_str, days = self.license_manager.get_license_status()
-        lic_text = f"라이센스: {days}일 남음\n({exp_str.split(' ')[0]})" if is_valid else "라이센스: 미인증"
+        # 라이선스 상태 표시 (구글 스프레드시트 기반)
+        is_valid, exp_str, days = self.license_client.get_license_status()
+        lic_text = f"라이센스: {days}일 남음\n({exp_str})" if is_valid else "라이센스: 미인증"
         self.license_label = ctk.CTkLabel(self.sidebar_frame, text=lic_text, font=ctk.CTkFont(size=11), text_color="lightgray")
         self.license_label.grid(row=2, column=0, padx=20, pady=(20, 5))
         
         self.renew_btn = ctk.CTkButton(self.sidebar_frame, text="라이센스 갱신 / 연장", font=ctk.CTkFont(size=12), fg_color="transparent", border_width=1, command=self.show_license_window)
         self.renew_btn.grid(row=3, column=0, padx=20, pady=5)
+        
+        # 하단 버전 정보 & 저작권 (사이드바 맨 아래)
+        self.version_label = ctk.CTkLabel(
+            self.sidebar_frame,
+            text=f"v{self.version}\n© 2026 Gemini Soft.",
+            font=ctk.CTkFont(size=10),
+            text_color="gray50"
+        )
+        self.version_label.grid(row=5, column=0, padx=20, pady=(0, 15), sticky="s")
 
         # --- Main Input Area ---
         self.main_frame = ctk.CTkFrame(self, fg_color="transparent")
@@ -213,13 +222,15 @@ class MainWindow(ctk.CTk):
         self.log_textbox.configure(state="disabled") # Read-only
         
     def show_license_window(self):
+        """라이선스 갱신 버튼 클릭 시 라이선스 다이얼로그 표시"""
         from src.ui.license_window import LicenseWindow
-        LicenseWindow(self, self.license_manager, self.update_license_ui)
+        LicenseWindow(self, self.license_client, self.update_license_ui)
         
     def update_license_ui(self):
-        is_valid, exp_str, days = self.license_manager.get_license_status()
+        """라이선스 상태 UI 갱신"""
+        is_valid, exp_str, days = self.license_client.get_license_status()
         if is_valid:
-            self.license_label.configure(text=f"라이센스: {days}일 남음\n({exp_str.split(' ')[0]})")
+            self.license_label.configure(text=f"라이센스: {days}일 남음\n({exp_str})")
             
     def toggle_scope_input(self):
         if self.scope_var.get():
