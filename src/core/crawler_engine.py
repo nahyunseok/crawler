@@ -66,8 +66,9 @@ class CrawlerEngine:
                     self.logger.error(f"Failed to initialize WebDriver even with forced version: {e2}\n{traceback.format_exc()}")
                     raise e2
             else:
-                self.logger.error(f"Failed to initialize WebDriver: {e}\n{traceback.format_exc()}")
-                raise e
+                tb = traceback.format_exc()
+                self.logger.error(f"Failed to initialize WebDriver: {e}\n{tb}")
+                raise Exception(f"{e}\n{tb}")
 
     def crawl(self, start_url, target_selector=None, max_depth=1, progress_callback=None, stop_event=None):
         """

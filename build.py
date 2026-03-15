@@ -47,6 +47,27 @@ def build_exe(version):
     # CustomTkinter needs some special packaging sometimes, but usually --noconsole and basic add-data is fine
     # For undetected_chromedriver, we don't need special assets but standard pyinstaller works
     
+    try:
+        import webdriver_manager
+        wm_path = os.path.dirname(webdriver_manager.__file__)
+        add_data_wm = f"{wm_path};webdriver_manager"
+    except ImportError:
+        add_data_wm = None
+
+    try:
+        import undetected_chromedriver
+        uc_path = os.path.dirname(undetected_chromedriver.__file__)
+        add_data_uc = f"{uc_path};undetected_chromedriver"
+    except ImportError:
+        add_data_uc = None
+
+    try:
+        import fake_useragent
+        fa_path = os.path.dirname(fake_useragent.__file__)
+        add_data_fa = f"{fa_path};fake_useragent"
+    except ImportError:
+        add_data_fa = None
+
     cmd = [
         sys.executable, "-m", "PyInstaller",
         "--noconfirm",
@@ -56,8 +77,24 @@ def build_exe(version):
         "--icon", "app_icon.ico",
         "--add-data", f"version.txt;.", # Include version file
         "--add-data", f"app_icon.ico;.", # Include icon inside the bundle for tkinter
-        "main.py"
     ]
+    
+    if add_data_wm:
+        cmd.extend(["--add-data", add_data_wm])
+    else:
+        cmd.extend(["--collect-all", "webdriver_manager"])
+        
+    if add_data_uc:
+        cmd.extend(["--add-data", add_data_uc])
+    else:
+        cmd.extend(["--collect-all", "undetected_chromedriver"])
+
+    if add_data_fa:
+        cmd.extend(["--add-data", add_data_fa])
+    else:
+        cmd.extend(["--collect-all", "fake_useragent"])
+        
+    cmd.append("main.py")
     
     print(f"Running: {' '.join(cmd)}")
     subprocess.run(cmd, check=True)

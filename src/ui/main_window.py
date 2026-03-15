@@ -386,9 +386,9 @@ class MainWindow(ctk.CTk):
             else:
                 self.after(0, lambda: self.append_log("다운로드가 완료되었으나 저장된 파일이 없습니다 (필터 설정 확인)."))
 
-        except Exception as e:
-            self.logger.error(f"Critical error in thread: {e}")
-            self.after(0, lambda: self.append_log(f"Error: {e}"))
+        except BaseException as e:
+            self.logger.error(f"Critical error or silent exit in thread: {e}")
+            self.after(0, lambda e=e: self.append_log(f"비정상 종료 감지됨: {e}"))
         finally:
             self.after(0, lambda: self.finish_crawling())
             
