@@ -58,7 +58,11 @@ class ImageDownloader:
         if not safe_title:
             safe_title = "Untitled"
 
+        import re
         hostname = urlparse(first_source).netloc.replace('www.', '').replace(':', '_')
+        # 보안 강화: 호스트네임에서 알파벳, 숫자, 점(.), 하이픈(-)만 허용 (Path Traversal 방지)
+        hostname = re.sub(r'[^a-zA-Z0-9\-\.]', '_', hostname)
+        
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         
         # New Format: [Title]_[Domain]_[Time] e.g. "iPhone15Pro_apple.com_20240101..."

@@ -17,7 +17,10 @@ class LicenseManager:
         os.makedirs(self.data_dir, exist_ok=True)
         self.license_file = os.path.join(self.data_dir, "license.dat")
         
-        self.secret_salt = "gemini_secret_salt_2026!@" # Simple salt
+        # Salt는 HWID와 조합하여 동적으로 생성 (하드코딩 제거)
+        from src.core.license_client import OnlineLicenseClient
+        self.hwid = OnlineLicenseClient()._get_hardware_id()
+        self.secret_salt = f"gemini_{self.hwid}_safe_2026"
         self._current_license = None
         self._load_license()
 
@@ -72,11 +75,8 @@ class LicenseManager:
             days_valid = 365
         elif upper_key.startswith("LIFETIME-"):
             days_valid = 36500
-        elif key == "test4321":  # Custom requested key (case-sensitive as typed by user, or make it insensitive if preferred. Let's make it exact)
-            days_valid = 365
-            upper_key = key # keep original for saving
         else:
-            return False, "유효하지 않은 라이센스 키 형식입니다. (test4321 등 유효한 키를 입력하세요)"
+            return False, "유효하지 않은 라이센스 키 형식입니다."
             
         # Simulate activation
         expiry_date = (datetime.now() + timedelta(days=days_valid)).strftime("%Y-%m-%d %H:%M:%S")

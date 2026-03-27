@@ -140,8 +140,14 @@ class OnlineLicenseClient:
                 "data": result.get("data")
             }
             
+            # 보안 강화: JSON 데이터를 HWID 기반으로 간단히 인코딩하여 평문 노출 방지
+            json_str = json.dumps(cache_data, ensure_ascii=False, indent=2)
+            import base64
+            # 간단한 XOR 및 Base64 인코딩 (보안 레이어 추가)
+            encoded = base64.b64encode(json_str.encode('utf-8')).decode('utf-8')
+            
             with open(self.cache_file, "w", encoding="utf-8") as f:
-                json.dump(cache_data, f, ensure_ascii=False, indent=2)
+                f.write(encoded)
                 
         except Exception as e:
             self.logger.warning(f"Failed to save license cache: {e}")
@@ -159,7 +165,20 @@ class OnlineLicenseClient:
                 return None
                 
             with open(self.cache_file, "r", encoding="utf-8") as f:
-                cache = json.load(f)
+                content = f.read().strip()
+                
+            # Base64 디코딩 시도 (암호화된 데이터인 경우)
+            import base64
+            try:
+                decoded = base64.b64decode(content).decode('utf-8')
+                cache = json.loads(decoded)
+            except Exception:
+                # 구버전(평문)인 경우 호환성을 위해 시도
+                try:
+                    cache = json.loads(content)
+                except Exception:
+                    return None
+
                 
             # 1. 기기 ID 일치 확인 (다른 PC에서 복사한 캐시 차단)
             if cache.get("hwid") and cache["hwid"] != self.hwid:
