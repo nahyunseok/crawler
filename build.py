@@ -47,9 +47,6 @@ def clean_build():
 def build_exe(version):
     print(f"🚀 Building executable (v{version})...")
     
-    # CustomTkinter needs some special packaging sometimes, but usually --noconsole and basic add-data is fine
-    # For undetected_chromedriver, we don't need special assets but standard pyinstaller works
-    
     try:
         import webdriver_manager
         wm_path = os.path.dirname(webdriver_manager.__file__)
@@ -75,11 +72,11 @@ def build_exe(version):
         sys.executable, "-m", "PyInstaller",
         "--noconfirm",
         "--onedir",
-        "--windowed", # Don't show console (set --console for debugging if needed, but we keep it windowed for release)
+        "--windowed",
         "--name", f"Gemini_Image_Crawler_v{version}",
         "--icon", "app_icon.ico",
-        "--add-data", f"version.txt;.", # Include version file
-        "--add-data", f"app_icon.ico;.", # Include icon inside the bundle for tkinter
+        "--add-data", f"version.txt;.",
+        "--add-data", f"app_icon.ico;.",
     ]
     
     if add_data_wm:
@@ -103,13 +100,31 @@ def build_exe(version):
     subprocess.run(cmd, check=True)
     print("✅ Build Completed!")
 
+def zip_build(version):
+    """빌드된 폴더를 ZIP 파일로 압축합니다."""
+    dist_path = "dist"
+    folder_name = f"Gemini_Image_Crawler_v{version}"
+    source_dir = os.path.join(dist_path, folder_name)
+    zip_filename = os.path.join(dist_path, folder_name) # .zip extension will be added by make_archive
+    
+    if not os.path.exists(source_dir):
+        print(f"❌ Error: Source directory {source_dir} not found for zipping.")
+        return
+
+    print(f"📦 Zipping build into {folder_name}.zip...")
+    try:
+        shutil.make_archive(zip_filename, 'zip', root_dir=dist_path, base_dir=folder_name)
+        print(f"✅ Compression successful: {folder_name}.zip")
+    except Exception as e:
+        print(f"❌ Compression failed: {e}")
+
 def generate_shortcut_script(version):
     print(f"🔗 Generating shortcut script for v{version}...")
     bat_content = f"""@echo off
 chcp 65001 >nul
 
 :: PowerShell을 이용해 바탕화면에 깔끔하게 바로가기 생성 및 아이콘 적용
-powershell -NoProfile -ExecutionPolicy Bypass -Command "Add-Type -AssemblyName System.Windows.Forms; $ErrorActionPreference = 'Stop'; $wshShell = New-Object -ComObject WScript.Shell; $desktopPath = [Environment]::GetFolderPath('Desktop'); $shortcutPath = Join-Path $desktopPath 'Gemini 이미지 수집기 V2.0.lnk'; $targetPath = Join-Path $PWD 'dist\Gemini_Image_Crawler_v{version}\Gemini_Image_Crawler_v{version}.exe'; $shortcut = $wshShell.CreateShortcut($shortcutPath); $shortcut.TargetPath = $targetPath; $shortcut.WorkingDirectory = Join-Path $PWD 'dist\Gemini_Image_Crawler_v{version}'; $shortcut.Description = 'Gemini 이미지 수집기 V2.0 실행'; $shortcut.IconLocation = Join-Path $PWD 'app_icon.ico'; $shortcut.Save(); [System.Windows.Forms.MessageBox]::Show('바탕화면에 [Gemini 이미지 수집기 V2.0] 바로가기가 생성되었습니다!', '설치 완료', 'OK', 'Information')"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "Add-Type -AssemblyName System.Windows.Forms; $ErrorActionPreference = 'Stop'; $wshShell = New-Object -ComObject WScript.Shell; $desktopPath = [Environment]::GetFolderPath('Desktop'); $shortcutPath = Join-Path $desktopPath 'Gemini 이미지 수집기 V2.0.lnk'; $targetPath = Join-Path $PWD 'dist\\Gemini_Image_Crawler_v{version}\\Gemini_Image_Crawler_v{version}.exe'; $shortcut = $wshShell.CreateShortcut($shortcutPath); $shortcut.TargetPath = $targetPath; $shortcut.WorkingDirectory = Join-Path $PWD 'dist\\Gemini_Image_Crawler_v{version}'; $shortcut.Description = 'Gemini 이미지 수집기 V2.0 실행'; $shortcut.IconLocation = Join-Path $PWD 'app_icon.ico'; $shortcut.Save(); [System.Windows.Forms.MessageBox]::Show('바탕화면에 [Gemini 이미지 수집기 V2.0] 바로가기가 생성되었습니다!', '설치 완료', 'OK', 'Information')"
 
 if %errorlevel% neq 0 (
     echo [오류] 바로가기 생성에 실패했습니다. 관리자 권한으로 실행해보세요.
@@ -135,6 +150,7 @@ if __name__ == "__main__":
     try:
         generate_shortcut_script(new_version)
         build_exe(new_version)
+        zip_build(new_version)
         generate_git_command(new_version)
     except Exception as e:
         print(f"❌ Build failed: {e}")
