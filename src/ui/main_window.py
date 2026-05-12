@@ -47,6 +47,15 @@ class MainWindow(ctk.CTk):
         self.destroy()
         
     def create_widgets(self):
+        # --- UI Variables Binding (안정성 규칙 4 준수: 입력 유실 방지) ---
+        self.url_var = ctk.StringVar(value="")
+        self.scope_text_var = ctk.StringVar(value="")
+        self.min_size_var = ctk.StringVar(value=str(self.config_manager.get("min_width", 200)))
+        self.exclude_var = ctk.StringVar(value=self.config_manager.get("exclude_keywords", "logo, icon, button, tracker, pixel, banner"))
+        self.include_var = ctk.StringVar(value=self.config_manager.get("include_keywords", ""))
+        self.login_wait_var = ctk.StringVar(value=str(self.config_manager.get("login_wait", 30)))
+        self.paging_entry_var = ctk.StringVar(value=self.config_manager.get("pagination_selector", ""))
+
         # --- Sidebar ---
         self.sidebar_frame = ctk.CTkFrame(self, width=200, corner_radius=0)
         self.sidebar_frame.grid(row=0, column=0, rowspan=4, sticky="nsew")
@@ -83,7 +92,7 @@ class MainWindow(ctk.CTk):
         self.url_label = ctk.CTkLabel(self.main_frame, text="수집할 주소(URL):", font=ctk.CTkFont(size=14))
         self.url_label.grid(row=0, column=0, sticky="w", pady=(0, 5))
         
-        self.url_entry = ctk.CTkEntry(self.main_frame, placeholder_text="https://example.com", width=500)
+        self.url_entry = ctk.CTkEntry(self.main_frame, placeholder_text="https://example.com", width=500, textvariable=self.url_var)
         self.url_entry.grid(row=1, column=0, sticky="ew", pady=(0, 20))
         
         # Action Buttons
@@ -127,7 +136,7 @@ class MainWindow(ctk.CTk):
         self.scope_var = ctk.BooleanVar(value=False)
         self.scope_check = ctk.CTkCheckBox(self.scope_frame, text="특정 영역만 수집", variable=self.scope_var, command=self.toggle_scope_input)
         self.scope_check.pack(side="left", padx=5)
-        self.scope_entry = ctk.CTkEntry(self.scope_frame, placeholder_text="예: #content 또는 .gallery-grid", width=250)
+        self.scope_entry = ctk.CTkEntry(self.scope_frame, placeholder_text="예: #content 또는 .gallery-grid", width=250, textvariable=self.scope_text_var)
         
         self.depth_label = ctk.CTkLabel(self.scope_frame, text="크롤링 깊이(PRO):")
         self.depth_label.pack(side="left", padx=(20, 5))
@@ -141,8 +150,7 @@ class MainWindow(ctk.CTk):
         
         self.min_size_label = ctk.CTkLabel(self.filter_row1, text="최소 오차 크기(px):")
         self.min_size_label.pack(side="left", padx=(5, 5))
-        self.min_size_entry = ctk.CTkEntry(self.filter_row1, width=60)
-        self.min_size_entry.insert(0, str(self.config_manager.get("min_width", 200)))
+        self.min_size_entry = ctk.CTkEntry(self.filter_row1, width=60, textvariable=self.min_size_var)
         self.min_size_entry.pack(side="left")
         self.min_size_entry.bind("<FocusOut>", self.save_settings)
         
@@ -164,8 +172,7 @@ class MainWindow(ctk.CTk):
         
         self.exclude_label = ctk.CTkLabel(self.filter_row2, text="제외 키워드:")
         self.exclude_label.pack(side="left", padx=5)
-        self.exclude_entry = ctk.CTkEntry(self.filter_row2, placeholder_text="logo, icon, banner, ad", width=350)
-        self.exclude_entry.insert(0, self.config_manager.get("exclude_keywords", "logo, icon, button, tracker, pixel, banner"))
+        self.exclude_entry = ctk.CTkEntry(self.filter_row2, placeholder_text="logo, icon, banner, ad", width=350, textvariable=self.exclude_var)
         self.exclude_entry.pack(side="left", padx=5)
         self.exclude_entry.bind("<FocusOut>", self.save_settings)
         
@@ -174,8 +181,7 @@ class MainWindow(ctk.CTk):
         
         self.include_label = ctk.CTkLabel(self.filter_row3, text="필수 포함 키워드:")
         self.include_label.pack(side="left", padx=5)
-        self.include_entry = ctk.CTkEntry(self.filter_row3, placeholder_text="예: 풍경, 사람, 리뷰 (비워두면 모두 수집)", width=320)
-        self.include_entry.insert(0, self.config_manager.get("include_keywords", ""))
+        self.include_entry = ctk.CTkEntry(self.filter_row3, placeholder_text="예: 풍경, 사람, 리뷰 (비워두면 모두 수집)", width=320, textvariable=self.include_var)
         self.include_entry.pack(side="left", padx=5)
         self.include_entry.bind("<FocusOut>", self.save_settings)
 
@@ -189,8 +195,7 @@ class MainWindow(ctk.CTk):
         
         self.login_wait_label = ctk.CTkLabel(self.auth_row1, text="대기 시간(초):")
         self.login_wait_label.pack(side="left", padx=(20, 5))
-        self.login_wait_entry = ctk.CTkEntry(self.auth_row1, width=50)
-        self.login_wait_entry.insert(0, str(self.config_manager.get("login_wait", 30)))
+        self.login_wait_entry = ctk.CTkEntry(self.auth_row1, width=50, textvariable=self.login_wait_var)
         self.login_wait_entry.pack(side="left")
         self.login_wait_entry.bind("<FocusOut>", self.save_settings)
 
@@ -201,8 +206,7 @@ class MainWindow(ctk.CTk):
         self.paging_check = ctk.CTkCheckBox(self.auth_row2, text="'다음 페이지' 버튼 자동 클릭 (순회수집)", variable=self.paging_var, command=self.save_settings)
         self.paging_check.pack(side="left", padx=5)
         
-        self.paging_entry = ctk.CTkEntry(self.auth_row2, placeholder_text="CSS 선택자 (예: a.next, #btnNext)", width=200)
-        self.paging_entry.insert(0, self.config_manager.get("pagination_selector", ""))
+        self.paging_entry = ctk.CTkEntry(self.auth_row2, placeholder_text="CSS 선택자 (예: a.next, #btnNext)", width=200, textvariable=self.paging_entry_var)
         self.paging_entry.pack(side="left", padx=5)
         self.paging_entry.bind("<FocusOut>", self.save_settings)
 
@@ -261,7 +265,7 @@ class MainWindow(ctk.CTk):
         try:
             self.config_manager.set("headless", self.headless_var.get())
             
-            width_val = self.min_size_entry.get()
+            width_val = self.min_size_var.get()
             self.config_manager.set("min_width", int(width_val) if width_val.isdigit() else 0)
             
             dl = self.delay_slider.get()
@@ -274,22 +278,22 @@ class MainWindow(ctk.CTk):
             self.config_manager.set("ext_png", self.ext_png.get())
             self.config_manager.set("ext_webp", self.ext_webp.get())
             self.config_manager.set("ext_gif", self.ext_gif.get())
-            self.config_manager.set("exclude_keywords", self.exclude_entry.get())
-            self.config_manager.set("include_keywords", self.include_entry.get())
+            self.config_manager.set("exclude_keywords", self.exclude_var.get())
+            self.config_manager.set("include_keywords", self.include_var.get())
             
             self.config_manager.set("manual_login", self.login_var.get())
-            wait_val = self.login_wait_entry.get()
+            wait_val = self.login_wait_var.get()
             self.config_manager.set("login_wait", int(wait_val) if wait_val.isdigit() else 30)
             
             self.config_manager.set("use_pagination", self.paging_var.get())
-            self.config_manager.set("pagination_selector", self.paging_entry.get())
+            self.config_manager.set("pagination_selector", self.paging_entry_var.get())
             
             self.logger.info("Settings updated.")
         except Exception as e:
             self.logger.error(f"Save settings error: {e}")
 
     def start_crawling_thread(self):
-        url = self.url_entry.get()
+        url = self.url_var.get()
         if not url:
             self.append_log("Error: Please enter a URL.")
             return
@@ -316,15 +320,14 @@ class MainWindow(ctk.CTk):
         self.stop_button.configure(state="disabled")
         
     def run_crawler(self):
-        url = self.url_entry.get().strip()
+        url = self.url_var.get().strip()
         if not url:
             return
             
         if not url.startswith(('http://', 'https://')):
             url = 'https://' + url
             def update_url():
-                self.url_entry.delete(0, 'end')
-                self.url_entry.insert(0, url)
+                self.url_var.set(url)
             self.after(0, update_url)
 
         try:
@@ -344,7 +347,7 @@ class MainWindow(ctk.CTk):
                 self.after(0, lambda: self.append_log(msg))
             
             # Get Scope Selector
-            target_selector = self.scope_entry.get() if self.scope_var.get() else None
+            target_selector = self.scope_text_var.get() if self.scope_var.get() else None
             
             # Get Depth
             depth_str = self.depth_var.get()

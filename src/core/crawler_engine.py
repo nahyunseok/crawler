@@ -9,6 +9,18 @@ from fake_useragent import UserAgent
 from bs4 import BeautifulSoup
 from src.utils.logger import get_logger
 
+# --- Monkeypatch for undetected_chromedriver shutdown error ---
+# This prevents Python garbage collector from printing "Exception ignored in: <function Chrome.__del__>" 
+# which causes unsightly "[WinError 6] The handle is invalid" errors upon closing on Windows.
+original_chrome_del = uc.Chrome.__del__
+def patched_chrome_del(self):
+    try:
+        original_chrome_del(self)
+    except Exception:
+        pass # Gracefully ignore standard cleanup exceptions
+uc.Chrome.__del__ = patched_chrome_del
+# -------------------------------------------------------------
+
 class CrawlerEngine:
     def __init__(self, config_manager):
         self.logger = get_logger()
@@ -49,19 +61,19 @@ class CrawlerEngine:
         except Exception as e:
             error_msg = str(e)
             if "This version of ChromeDriver only supports Chrome version" in error_msg:
-                self.logger.warning("ChromeDriver version mismatch detected. Downloading specific version 145...")
+                self.logger.warning("ChromeDriver version mismatch detected. Attempting auto-recovery with ChromeDriverManager...")
                 try:
-                    # Manually download the matching driver for v145
+                    # Automatically download the matching driver version for current chrome browser
                     from webdriver_manager.chrome import ChromeDriverManager
-                    driver_path = ChromeDriverManager(driver_version="145.0.7632.117").install()
+                    driver_path = ChromeDriverManager().install()
                     
-                    self.logger.info(f"Driver downloaded to: {driver_path}. Initializing uc.Chrome...")
+                    self.logger.info(f"Matched driver downloaded to: {driver_path}. Re-initializing uc.Chrome...")
                     # MUST recreate options because uc.Chrome mutates/destroys them on failure
                     fallback_options = create_options()
                     self.driver = uc.Chrome(options=fallback_options, use_subprocess=True, driver_executable_path=driver_path)
                     
                     self.driver.set_page_load_timeout(30)
-                    self.logger.info("WebDriver initialized successfully with forced version 145.")
+                    self.logger.info("WebDriver initialized successfully via fallback driver manager.")
                 except Exception as e2:
                     self.logger.error(f"Failed to initialize WebDriver even with forced version: {e2}\n{traceback.format_exc()}")
                     raise e2

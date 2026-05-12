@@ -34,11 +34,16 @@ class ImageDownloader:
                 
         # Filter duplicates (Resume feature)
         new_images = []
+        skipped_count = 0
         for img in images_data:
             if img['src'] in history:
-                self.logger.info(f"Skipped {img['filename']}: Already downloaded (이어받기)")
+                self.logger.debug(f"Skipped {img['filename']}: Already downloaded (이어받기)")
+                skipped_count += 1
                 continue
             new_images.append(img)
+            
+        if skipped_count > 0:
+            self.logger.info(f"중복 제외됨: {skipped_count}개의 이미지는 이미 받아져 건너뜁니다. (이어받기)")
             
         if not new_images:
             self.logger.info("모든 이미지가 이미 다운로드되어 있습니다. (이어받기 완료)")
@@ -93,6 +98,10 @@ class ImageDownloader:
                 completed += 1
                 if progress_callback:
                     progress_callback(completed / total_images)
+                
+                # Reduce log spam by showing summary instead of every single file
+                if completed % 20 == 0 or completed == total_images:
+                    self.logger.info(f"다운로드 진행 중: {completed}/{total_images} ({int(completed/total_images*100)}%)")
                     
                 result = future.result()
                 if result:
@@ -105,80 +114,105 @@ class ImageDownloader:
                 json.dump(list(history), f, ensure_ascii=False, indent=2)
         except Exception as e:
             self.logger.warning(f"Failed to save download history: {e}")
-                
         # Generate Excel Report
         self.create_report(downloaded_images, save_dir)
         return save_dir
 
     def _download_single_image(self, img, idx, save_dir, stop_event=None):
-        """Downloads a single image with retry logic (PRO Feature)."""
+        """Downloads a single image, supporting both URLs and Data URIs (Base64)."""
         url = img['src']
         filename = f"{idx+1:03d}_{img['filename']}"
         filepath = os.path.join(save_dir, filename)
         
-        # PRO Feature: Smart Retry with Exponential Backoff
-        max_retries = 3
+        image_content = None
         
-        for attempt in range(max_retries):
-            if stop_event and stop_event.is_set():
+        # --- Step 1: Retrieve Content ---
+        if url.startswith('data:image/'):
+            # Support for embedded Base64 images
+            try:
+                import base64
+                if ',' in url:
+                    header, encoded = url.split(',', 1)
+                    image_content = base64.b64decode(encoded)
+                else:
+                    return None
+            except Exception as e:
+                self.logger.debug(f"Failed to decode base64 for {filename[:20]}: {e}")
+                return None
+        else:
+            # Smart Retry logic for standard HTTP downloads
+            max_retries = 3
+            for attempt in range(max_retries):
+                if stop_event and stop_event.is_set():
+                    return None
+                try:
+                    headers = {
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                        'Referer': img['source_page']
+                    }
+                    response = requests.get(url, headers=headers, stream=True, timeout=10)
+                    if response.status_code == 200:
+                        image_content = response.content
+                        break # Success, exit retry loop
+                    else:
+                        self.logger.debug(f"Failed {filename[:15]}... (Status {response.status_code})")
+                except Exception as e:
+                    # We log the shortened URL or filename to prevent flooding logs with giant URLs
+                    self.logger.debug(f"Request error for {filename[:20]}: {e}")
+                
+                if attempt < max_retries - 1:
+                    time.sleep(2 ** attempt)
+
+        if not image_content:
+            return None
+
+        # --- Step 2: Validate, Save & Process ---
+        try:
+            # Check constraints
+            image = Image.open(BytesIO(image_content))
+            min_width = self.config.get("min_width", 0)
+            min_height = self.config.get("min_height", 0)
+            
+            if image.width < min_width or image.height < min_height:
+                self.logger.debug(f"Skipped {filename}: Too small ({image.width}x{image.height})")
                 return None
                 
-            try:
-                # Mimic browser headers
-                headers = {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                    'Referer': img['source_page']
-                }
-                
-                response = requests.get(url, headers=headers, stream=True, timeout=10)
-                
-                if response.status_code == 200:
-                    image_content = response.content
-                    image = Image.open(BytesIO(image_content))
-                    
-                    min_width = self.config.get("min_width", 0)
-                    min_height = self.config.get("min_height", 0)
-                    
-                    if image.width < min_width or image.height < min_height:
-                        self.logger.info(f"Skipped {filename}: Too small ({image.width}x{image.height})")
-                        return None
-                        
-                    # Save image
-                    with open(filepath, 'wb') as f:
-                        f.write(image_content)
-                    
-                    # Save Text Data (.txt)
-                    txt_filename = os.path.splitext(filename)[0] + ".txt"
-                    txt_filepath = os.path.join(save_dir, txt_filename)
-                    try:
-                        with open(txt_filepath, "w", encoding="utf-8") as f:
-                            f.write(f"파일이름: {filename}\n")
-                            f.write(f"출처링크: {url}\n")
-                            f.write(f"이미지설명: {img.get('description', '없음')}\n")
-                            f.write(f"단락 제목(Heading): {img.get('heading', '없음')}\n")
-                            f.write(f"----------------------------------------\n")
-                            f.write(f"[주변 텍스트 문맥]\n")
-                            f.write(f"{img.get('context', '없음')}\n")
-                    except Exception as e:
-                        pass # Text save failure shouldn't stop flow
+            # Safe filename patch if extension doesn't match base64 source
+            if url.startswith('data:image/') and '.' not in filename:
+                 # Try to deduce from PIL format
+                 filepath += f".{image.format.lower()}" if image.format else ".jpg"
 
-                    # Update metadata
-                    img['saved_filename'] = filename
-                    img['resolution'] = f"{image.width}x{image.height}"
-                    self.logger.info(f"Downloaded: {filename}")
-                    return img
-                    
-                else:
-                    self.logger.warning(f"Failed {filename} (Attempt {attempt+1}/{max_retries}): Status {response.status_code}")
-                    
-            except Exception as e:
-                self.logger.error(f"Error {filename} (Attempt {attempt+1}/{max_retries}): {e}")
+            # Write raw image data
+            with open(filepath, 'wb') as f:
+                f.write(image_content)
             
-            # Backoff before retry (1s, 2s, 4s...)
-            if attempt < max_retries - 1:
-                time.sleep(2 ** attempt)
-        
-        return None
+            # Save supporting text metadata
+            txt_filename = os.path.splitext(filename)[0] + ".txt"
+            txt_filepath = os.path.join(save_dir, txt_filename)
+            try:
+                with open(txt_filepath, "w", encoding="utf-8") as f:
+                    f.write(f"파일이름: {filename}\n")
+                    # Prevent bloating txt file if it's a giant base64 string
+                    clean_src = url if len(url) < 200 else "Base64 Data (String too long for log)"
+                    f.write(f"출처링크: {clean_src}\n")
+                    f.write(f"이미지설명: {img.get('description', '없음')}\n")
+                    f.write(f"단락 제목(Heading): {img.get('heading', '없음')}\n")
+                    f.write("-" * 40 + "\n")
+                    f.write(f"[주변 텍스트 문맥]\n")
+                    f.write(f"{img.get('context', '없음')}\n")
+            except Exception:
+                pass # Non-critical failure
+
+            # Add tracking metadata
+            img['saved_filename'] = os.path.basename(filepath)
+            img['resolution'] = f"{image.width}x{image.height}"
+            self.logger.debug(f"Successfully saved: {img['saved_filename']}")
+            return img
+            
+        except Exception as e:
+            self.logger.debug(f"Processing failed for {filename[:20]}: {e}")
+            return None
+
 
     def create_report(self, images_data, output_dir):
         """Creates an Excel report from value data."""
