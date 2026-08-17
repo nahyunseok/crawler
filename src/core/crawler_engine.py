@@ -7,7 +7,11 @@ import traceback
 from urllib.parse import urljoin, urlparse, urldefrag, urlunparse
 from urllib import robotparser
 import undetected_chromedriver as uc
-from fake_useragent import UserAgent
+# ⛔ fake_useragent 를 쓰지 않는다(DO NOT RE-ADD — INTENDED).
+#    browsers=['chrome'] 로 요청해도 20회 모두 Edge UA 를 돌려주고, 내부 조회가 실패해
+#    고정된 fallback 하나만 반복 반환했다(=로테이션 아님). 게다가 그 UA 의 버전(122)이
+#    실제 크롬(151)과 달라, 봇 감지에 가장 쉽게 걸리는 모순 신호를 만들었다.
+#    → build_user_agent() 에서 '실제 설치된 크롬 버전' 기반으로 UA 를 만든다.
 from bs4 import BeautifulSoup
 from src.utils.logger import get_logger
 from src.utils.config_manager import allowed_extensions
@@ -112,8 +116,72 @@ class CrawlerEngine:
         # 너무 짧으면 정상 페이지도 실패하므로 하한을 둔다
         return max(value, MIN_PAGE_LOAD_TIMEOUT)
 
+    def installed_chrome_major(self):
+        """
+        이 PC 에 설치된 크롬의 메이저 버전을 알아낸다 (못 찾으면 None).
+
+        ⛔ 수정금지(DO NOT MODIFY — INTENDED)
+        무엇: 설치 폴더의 버전 폴더명에서 버전을 읽는다.
+        왜:   undetected_chromedriver 는 크롬 버전을 스스로 감지하지 못할 때가 있어
+              "could not detect version_main ... assuming it is chrome 108 or higher" 로 넘어간 뒤
+              엉뚱한 드라이버를 받아 실패한다. 그러면 ChromeDriverManager 폴백으로 다시 받는데
+              여기서 매 실행마다 약 6초가 낭비됐다(실측: 00:32:43 → 00:32:49).
+              실제 버전을 미리 알려주면 첫 시도에 성공한다.
+        건드리면: 크롬을 켤 때마다 불필요한 재시도와 드라이버 재다운로드가 발생한다.
+        """
+        candidates = [
+            r"C:\Program Files\Google\Chrome\Application",
+            r"C:\Program Files (x86)\Google\Chrome\Application",
+            os.path.join(os.environ.get("LOCALAPPDATA", ""), r"Google\Chrome\Application"),
+        ]
+        for base in candidates:
+            try:
+                if not base or not os.path.isdir(base):
+                    continue
+                versions = [n for n in os.listdir(base) if re.fullmatch(r"\d+\.\d+\.\d+\.\d+", n)]
+                if versions:
+                    newest = sorted(versions, key=lambda v: [int(x) for x in v.split('.')])[-1]
+                    return int(newest.split('.')[0])
+            except Exception:
+                continue
+        return None
+
+    def build_user_agent(self, chrome_major=None):
+        """
+        브라우저에 씌울 User-Agent 문자열을 만든다. 만들 수 없으면 None(덮어쓰지 않음).
+
+        ⛔ 수정금지(DO NOT MODIFY / DO NOT REPLACE WITH fake_useragent — INTENDED)
+        무엇: '실제로 설치된 크롬 버전' 을 그대로 담은 Chrome UA 를 만든다.
+        왜:   예전에는 fake_useragent 로 무작위 UA 를 받아 썼는데, 실측 결과 심각했다.
+              · browsers=['chrome'] 로 요청했는데 20회 모두 **Edge** UA 를 돌려줬다
+              · 매 호출이 내부적으로 실패해 고정된 fallback 하나만 계속 썼다(=로테이션 아님)
+              · 그 UA 는 Chrome 122 인데 이 PC 의 실제 크롬은 151 이었다
+              결과적으로 '크롬 151 엔진으로 접속하면서 나는 Edge 122 다' 라고 주장하는 꼴이 되어,
+              봇 감지 시스템이 가장 쉽게 잡아내는 모순 신호를 스스로 만들어 보냈다.
+              (계정 정지·IP 차단을 막는 것이 이 프로그램의 핵심 가치인데 정반대로 동작했다)
+        참고:  UA 를 아예 덮어쓰지 않으면 headless 모드에서 'HeadlessChrome/151' 이 노출된다
+              (실측 확인). 그래서 '덮어쓰지 않기' 도 답이 아니고, 실제 버전과 일치하는
+              Chrome UA 로 덮어쓰는 것이 정답이다. 버전·플랫폼·엔진이 모두 실제와 맞고
+              headless 흔적만 사라진다.
+        건드리면: 봇으로 감지되어 차단되는 사이트가 늘어난다.
+        """
+        major = chrome_major or self.installed_chrome_major()
+        if not major:
+            return None
+        return (
+            f"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            f"(KHTML, like Gecko) Chrome/{major}.0.0.0 Safari/537.36"
+        )
+
     def setup_driver(self):
         """Initializes undetected-chromedriver."""
+
+        # 실제 크롬 버전을 미리 알아둔다 (UA 생성과 드라이버 버전 지정에 함께 쓴다)
+        chrome_major = self.installed_chrome_major()
+        if chrome_major:
+            self.logger.info(f"Detected installed Chrome major version: {chrome_major}")
+        else:
+            self.logger.warning("설치된 크롬 버전을 확인하지 못했습니다 (자동 감지에 맡깁니다).")
 
         def create_options():
             options = uc.ChromeOptions()
@@ -133,19 +201,28 @@ class CrawlerEngine:
             elif self.config.get("headless", True):
                 options.add_argument("--headless=new")
 
-            # Dynamic User-Agent
+            # User-Agent — 실제 설치된 크롬 버전과 일치하는 값을 쓴다 (build_user_agent 주석 참조)
             # ⛔ 수정금지(DO NOT MODIFY — INTENDED): 설정값(user_agent_rotation)을 실제로 확인한다.
             #    예전에는 이 설정을 아무도 읽지 않아, settings.json 에서 false 로 바꿔도
-            #    User-Agent 가 계속 무작위로 바뀌었다('죽은 설정' — 표시와 동작 불일치).
+            #    User-Agent 가 계속 덮어써졌다('죽은 설정' — 표시와 동작 불일치).
             if self.config.get("user_agent_rotation", True):
-                try:
-                    ua = UserAgent(os='windows', browsers=['chrome'])
-                    random_ua = ua.random
-                    self.logger.info(f"Using User-Agent: {random_ua}")
-                    options.add_argument(f"user-agent={random_ua}")
-                except Exception as e:
-                    # UA 목록을 못 불러와도 수집 자체는 계속되어야 한다
-                    self.logger.warning(f"User-Agent rotation unavailable, using browser default: {e}")
+                user_agent = self.build_user_agent(chrome_major)
+                if user_agent:
+                    self.logger.info(f"Using User-Agent: {user_agent}")
+                    # ⛔ 수정금지(DO NOT REMOVE THE LEADING DASHES — INTENDED)
+                    # 무엇: 반드시 '--user-agent=' 로 두 개의 하이픈을 붙인다.
+                    # 왜:   예전 코드는 'user-agent=...' (하이픈 없음)였다. 크롬은 이것을 스위치로
+                    #       인식하지 못하므로 **UA 덮어쓰기가 한 번도 동작하지 않았다.**
+                    #       그런데 로그에는 "Using User-Agent: ..." 가 찍혀서, 적용된 것처럼 보였다.
+                    #       실제로 브라우저가 보낸 UA 는 'HeadlessChrome/151...' 이었고(실측 확인),
+                    #       이는 자동화 도구임을 그대로 알리는 가장 강한 봇 감지 신호다.
+                    options.add_argument(f"--user-agent={user_agent}")
+                else:
+                    # 크롬 버전을 못 알아낸 경우 — 억지로 만든 UA 로 덮어쓰면 오히려 불일치가 되므로
+                    # 브라우저 기본값을 그대로 둔다(headless 흔적이 남지만 모순 신호는 없다).
+                    self.logger.warning(
+                        "크롬 버전을 확인하지 못해 User-Agent 를 덮어쓰지 않습니다 (브라우저 기본값 사용)."
+                    )
             else:
                 self.logger.info("User-Agent rotation disabled by settings.")
 
@@ -161,7 +238,12 @@ class CrawlerEngine:
             self.logger.info("Initializing undetected-chromedriver...")
             # Use undetected_chromedriver without needing standard webdriver_manager explicitly
             options = create_options()
-            self.driver = uc.Chrome(options=options, use_subprocess=True)
+            # ⛔ 수정금지(DO NOT MODIFY — INTENDED): version_main 에 실제 크롬 메이저 버전을 넘긴다.
+            # 왜: 넘기지 않으면 undetected_chromedriver 가 버전을 감지하지 못해 엉뚱한 드라이버를
+            #     받고 실패한 뒤 ChromeDriverManager 폴백으로 다시 받는다. 실측으로 매 실행 약 6초가
+            #     낭비됐다(크롬 151 인데 122 로 가정 → 불일치 → 재다운로드).
+            # 건드리면: 프로그램을 켤 때마다 불필요한 대기와 드라이버 재다운로드가 발생한다.
+            self.driver = uc.Chrome(options=options, use_subprocess=True, version_main=chrome_major)
             self.driver.set_page_load_timeout(self._page_load_timeout())
             self.logger.info("WebDriver initialized successfully.")
         except Exception as e:
@@ -176,7 +258,10 @@ class CrawlerEngine:
                     self.logger.info(f"Matched driver downloaded to: {driver_path}. Re-initializing uc.Chrome...")
                     # MUST recreate options because uc.Chrome mutates/destroys them on failure
                     fallback_options = create_options()
-                    self.driver = uc.Chrome(options=fallback_options, use_subprocess=True, driver_executable_path=driver_path)
+                    self.driver = uc.Chrome(
+                        options=fallback_options, use_subprocess=True,
+                        driver_executable_path=driver_path, version_main=chrome_major
+                    )
 
                     self.driver.set_page_load_timeout(self._page_load_timeout())
                     self.logger.info("WebDriver initialized successfully via fallback driver manager.")
@@ -821,6 +906,17 @@ class CrawlerEngine:
             if stop_event and stop_event.is_set():
                 break
 
+            # ⛔ 수정금지(DO NOT MOVE THIS BELOW THE BOTTOM-CHECK — INTENDED)
+            # 무엇: 진행 안내를 '스크롤 직후, 대기 전' 에 한다. 루프 끝으로 내리면 안 된다.
+            # 왜:  ① 매번 찍으면 긴 페이지에서 로그가 같은 줄 수백 개로 도배된다 → 간격을 둔다.
+            #      ② 그런데 안내를 루프 '끝' 에 두면, 짧은 페이지는 바닥에 닿아 break 로 먼저
+            #         빠져나가므로 한 줄도 출력되지 않는다. 실제로 그렇게 만들어 돌려보고 확인했다.
+            #         실측(rememoryphoto.com)에서 '이동 중' 이후 11초 동안 화면에 아무 변화가 없어
+            #         사용자는 프로그램이 멈춘 것으로 느꼈다(전역수칙 4 — 멈춘 듯 보이게 하지 말 것).
+            #      그래서 첫 스크롤은 '대기하기 전에' 반드시 알린다.
+            if callback and (scroll_count == 1 or scroll_count % SCROLL_LOG_INTERVAL == 0):
+                callback(f"페이지를 내리며 이미지를 불러오는 중... ({scroll_count}번째)")
+
             # Scroll down iteratively instead of all at once to seem more human
             self.driver.execute_script("window.scrollBy(0, 800);")
 
@@ -842,12 +938,6 @@ class CrawlerEngine:
                 final_height = self.driver.execute_script("return document.body.scrollHeight")
                 if final_height == new_height:
                     break
-
-            # ⛔ 로그 도배 금지: 예전에는 스크롤 한 번마다 같은 문구를 찍어서
-            #    긴 페이지에서는 실시간 로그가 똑같은 줄 수백 개로 가득 찼다.
-            #    (정작 중요한 안내가 위로 밀려 보이지 않게 된다)
-            if callback and scroll_count % SCROLL_LOG_INTERVAL == 0:
-                callback(f"페이지를 내리며 이미지를 불러오는 중... ({scroll_count}번째)")
 
     # ──────────────────────────────────────────────────────────
     # 필터

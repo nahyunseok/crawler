@@ -417,7 +417,171 @@ def test_페이지_로딩_대기시간_하한이_지켜진다(tmp_path):
 
 
 # ──────────────────────────────────────────────────────────────
-# 10. 매뉴얼과 실제 동작이 일치하는지 (문서도 '표시=동작' 대상이다)
+# 10. User-Agent — 봇 감지를 유발하는 모순 신호를 만들지 않는다
+# ──────────────────────────────────────────────────────────────
+@pytest.mark.parametrize("크롬버전", [120, 151, 200])
+def test_유저에이전트는_실제_크롬_버전과_일치한다(tmp_path, 크롬버전):
+    """
+    ⛔ 회귀 방지(계정 안전 — 전역수칙 6): 예전에는 fake_useragent 로 UA 를 받아 썼는데
+       실측 결과 20회 모두 Edge UA 였고, 버전은 122 인데 실제 크롬은 151 이었다.
+       '크롬 151 엔진으로 접속하면서 나는 Edge 122 다' 라는 모순 신호를 스스로 보낸 것이라
+       봇 감지에 가장 쉽게 걸렸다.
+    """
+    e = _엔진(tmp_path)
+    ua = e.build_user_agent(크롬버전)
+
+    assert ua is not None
+    assert f"Chrome/{크롬버전}.0.0.0" in ua, f"UA 버전이 실제 크롬({크롬버전})과 다르다: {ua}"
+    assert "Edg/" not in ua, f"크롬으로 접속하면서 Edge 라고 주장한다: {ua}"
+    assert "OPR/" not in ua, f"크롬으로 접속하면서 Opera 라고 주장한다: {ua}"
+    assert "HeadlessChrome" not in ua, f"headless 흔적이 노출된다: {ua}"
+    assert "Windows NT" in ua and "Safari/537.36" in ua, "일반 크롬 UA 형식이 아니다"
+
+
+def test_크롬_버전을_모르면_UA를_덮어쓰지_않는다(tmp_path):
+    """
+    ⛔ 억지로 만든 UA 로 덮어쓰면 오히려 실제 브라우저와 어긋난다.
+       버전을 모를 때는 브라우저 기본값을 그대로 두는 것이 안전하다.
+    """
+    e = _엔진(tmp_path)
+    assert e.build_user_agent(None) is None or e.installed_chrome_major() is not None
+
+
+def test_유저에이전트_인수에_하이픈이_붙어있다():
+    """
+    ⛔ 회귀 방지(가장 치명적이었던 결함): 예전 코드는 'user-agent=...' 로 하이픈이 없었다.
+       크롬은 이것을 스위치로 인식하지 못하므로 **UA 덮어쓰기가 한 번도 동작하지 않았다.**
+       그런데 로그에는 "Using User-Agent: ..." 가 찍혀 적용된 것처럼 보였고,
+       실제 브라우저는 'HeadlessChrome/151...' 을 그대로 보내고 있었다(실측 확인).
+       이는 자동화 도구임을 스스로 알리는 가장 강한 봇 감지 신호다.
+    """
+    from src.core import crawler_engine
+
+    소스 = _코드만(crawler_engine.CrawlerEngine.setup_driver)
+    ua_줄 = [줄.strip() for 줄 in 소스.splitlines() if "user-agent" in 줄.lower() and "add_argument" in 줄]
+
+    assert ua_줄, "UA 를 설정하는 코드가 사라졌다"
+    for 줄 in ua_줄:
+        assert '"--user-agent=' in 줄 or "'--user-agent=" in 줄, \
+            f"크롬이 인식하지 못하는 형식이다(하이픈 두 개 필요): {줄}"
+
+
+@pytest.mark.parametrize("스위치", [
+    "--headless=new", "--no-sandbox", "--disable-dev-shm-usage",
+    "--start-maximized", "--disable-popup-blocking", "--disable-notifications",
+])
+def test_모든_크롬_스위치에_하이픈이_붙어있다(스위치):
+    """⛔ 하이픈 빠진 스위치는 조용히 무시된다 — UA 사고와 같은 유형을 미리 막는다."""
+    from src.core import crawler_engine
+
+    소스 = _코드만(crawler_engine.CrawlerEngine.setup_driver)
+    assert 스위치 in 소스, f"{스위치} 가 없거나 형식이 다르다"
+
+
+def test_add_argument_에_하이픈_없는_인수가_없다():
+    """⛔ 회귀 방지: add_argument 에 넘기는 값은 반드시 '--' 로 시작해야 한다."""
+    import re as _re
+    from src.core import crawler_engine
+
+    소스 = _코드만(crawler_engine.CrawlerEngine.setup_driver)
+    인수들 = _re.findall(r'add_argument\(\s*f?["\']([^"\']*)', 소스)
+
+    나쁜_인수 = [a for a in 인수들 if not a.startswith("--")]
+    assert not 나쁜_인수, f"하이픈 없이 넘기는 인수가 있다(크롬이 무시한다): {나쁜_인수}"
+
+
+def test_fake_useragent_에_다시_의존하지_않는다():
+    """⛔ 회귀 방지: 이 라이브러리는 Edge UA 를 돌려주고 로테이션도 되지 않았다."""
+    from src.core import crawler_engine
+
+    소스 = _코드만(crawler_engine)
+    assert "fake_useragent" not in 소스, "신뢰할 수 없는 UA 라이브러리를 다시 쓰고 있다"
+    assert "UserAgent(" not in 소스
+
+
+def test_설치된_크롬_버전을_감지한다(tmp_path):
+    """드라이버 버전 지정과 UA 생성의 근거가 되는 값이므로 실제로 읽혀야 한다."""
+    e = _엔진(tmp_path)
+    major = e.installed_chrome_major()
+
+    # 이 PC 에 크롬이 있으면 숫자를 돌려주고, 없으면 None (둘 다 정상)
+    assert major is None or (isinstance(major, int) and major > 0)
+
+
+def test_드라이버_생성에_실제_버전을_넘긴다():
+    """
+    ⛔ 회귀 방지: version_main 을 넘기지 않으면 uc 가 버전을 감지하지 못해 엉뚱한 드라이버를
+       받고 실패한 뒤 폴백으로 다시 받는다. 실측으로 매 실행 약 6초가 낭비됐다.
+    """
+    from src.core import crawler_engine
+
+    소스 = _코드만(crawler_engine.CrawlerEngine.setup_driver)
+    호출들 = [줄 for 줄 in 소스.splitlines() if "uc.Chrome(" in 줄 or "version_main" in 줄]
+
+    assert any("version_main=chrome_major" in 줄 for 줄 in 호출들), \
+        f"드라이버 생성에 실제 크롬 버전을 넘기지 않는다: {호출들}"
+
+
+class _가짜드라이버:
+    """크롬 없이 auto_scroll 을 돌리기 위한 최소 대역. '한 번 스크롤하면 바닥' 인 짧은 페이지를 흉내낸다."""
+    def __init__(self, 페이지높이=800):
+        self.높이 = 페이지높이
+        self.스크롤횟수 = 0
+
+    def execute_script(self, script):
+        if "scrollBy" in script:
+            self.스크롤횟수 += 1
+            return None
+        if "pageYOffset" in script:
+            return self.높이          # 이미 바닥에 닿은 상태
+        if "scrollHeight" in script:
+            return self.높이
+        return None
+
+
+def test_짧은_페이지에서도_첫_스크롤_안내가_실제로_나온다(tmp_path):
+    """
+    ⛔ 회귀 방지(코드 문자열 검사로는 못 잡았던 버그): 안내를 루프 '끝' 에 두면
+       짧은 페이지는 바닥에 닿아 break 로 먼저 빠져나가므로 한 줄도 출력되지 않는다.
+       실제로 그렇게 만들어 돌려 보고 발견했다 — 그래서 이 테스트는 '실행 결과' 를 본다.
+    """
+    e = _엔진(tmp_path, delay_level=1, random_delay_min=0.01, random_delay_max=0.01)
+    e.driver = _가짜드라이버()
+    받은_메시지 = []
+
+    e.auto_scroll(callback=받은_메시지.append)
+
+    assert 받은_메시지, "짧은 페이지에서 진행 안내가 한 줄도 나오지 않았다(멈춘 것처럼 보인다)"
+    assert "1번째" in 받은_메시지[0], f"첫 스크롤 안내가 아니다: {받은_메시지[0]}"
+
+
+def test_긴_페이지에서_로그가_도배되지_않는다(tmp_path):
+    """짝 테스트 — 첫 안내를 넣었더라도 이후에는 간격을 두어야 한다."""
+    class _긴페이지(_가짜드라이버):
+        def execute_script(self, script):
+            if "scrollBy" in script:
+                self.스크롤횟수 += 1
+                self.높이 += 800      # 스크롤할수록 페이지가 늘어난다(무한 스크롤)
+                return None
+            if "pageYOffset" in script:
+                return 0              # 계속 바닥에 못 닿는다
+            if "scrollHeight" in script:
+                return self.높이
+            return None
+
+    e = _엔진(tmp_path, max_scrolls=30, random_delay_min=0.001, random_delay_max=0.001)
+    e.driver = _긴페이지()
+    받은_메시지 = []
+
+    e.auto_scroll(callback=받은_메시지.append)
+
+    assert e.driver.스크롤횟수 == 30, "설정한 최대 스크롤 횟수만큼 돌아야 한다"
+    assert len(받은_메시지) <= 5, f"30번 스크롤에 안내가 {len(받은_메시지)}줄 — 로그가 도배된다"
+    assert len(받은_메시지) >= 2, "너무 조용하면 진행 상황을 알 수 없다"
+
+
+# ──────────────────────────────────────────────────────────────
+# 11. 매뉴얼과 실제 동작이 일치하는지 (문서도 '표시=동작' 대상이다)
 # ──────────────────────────────────────────────────────────────
 def _매뉴얼():
     return open("MANUAL.md", encoding="utf-8").read()
