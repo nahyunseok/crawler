@@ -5,7 +5,6 @@ Golden_Keyword 프로젝트에서 이식 후 Gemini Image Crawler에 맞게 조�
 import customtkinter as ctk
 from tkinter import messagebox
 from datetime import datetime
-import json
 import os
 import sys
 import threading
@@ -180,29 +179,31 @@ class LicenseWindow(ctk.CTkToplevel):
         자동으로 서버 검증하지 않음 — 사용자가 다른 키로 변경할 수 있어야 하므로.
         """
         try:
-            if os.path.exists(self.client.cache_file):
-                with open(self.client.cache_file, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    cached_key = data.get("key", "")
-                    if cached_key:
-                        self.key_entry.insert(0, cached_key)
-                        # 로컬 캐시 정보만 표시 (서버 통신 없음)
-                        cached_result = self.client.check_local_validity()
-                        if cached_result and cached_result.get("valid"):
-                            exp_data = cached_result.get("data", {})
-                            raw_expiry = exp_data.get("expiration", "-")
-                            if "T" in raw_expiry:
-                                raw_expiry = raw_expiry.split("T")[0]
-                            self.status_label.configure(
-                                text="상태: ✅ 인증됨 (캐시)",
-                                text_color="#2ecc71"
-                            )
-                            self.expiry_label.configure(text=f"만료일: {raw_expiry}")
-                        else:
-                            self.status_label.configure(
-                                text="상태: 키가 만료되었거나 재인증이 필요합니다.",
-                                text_color="#f39c12"
-                            )
+            # ⛔ 캐시 파일은 서명+Base64로 저장되므로 반드시 클라이언트를 통해 읽어야 한다.
+            #    (여기서 평문 json.load 를 쓰던 시절에는 기존 키가 아예 표시되지 않았다)
+            cached_key = self.client.get_cached_key()
+            if not cached_key:
+                return
+
+            self.key_entry.insert(0, cached_key)
+
+            # 로컬 캐시 정보만 표시 (서버 통신 없음)
+            cached_result = self.client.check_local_validity()
+            if cached_result and cached_result.get("valid"):
+                exp_data = cached_result.get("data", {})
+                raw_expiry = exp_data.get("expiration", "-")
+                if "T" in raw_expiry:
+                    raw_expiry = raw_expiry.split("T")[0]
+                self.status_label.configure(
+                    text="상태: ✅ 인증됨 (캐시)",
+                    text_color="#2ecc71"
+                )
+                self.expiry_label.configure(text=f"만료일: {raw_expiry}")
+            else:
+                self.status_label.configure(
+                    text="상태: 키가 만료되었거나 재인증이 필요합니다.",
+                    text_color="#f39c12"
+                )
         except Exception:
             pass
 

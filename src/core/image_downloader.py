@@ -1,5 +1,8 @@
 import os
+import re
+import json
 import time
+import threading
 import requests
 import pandas as pd
 from datetime import datetime
@@ -9,159 +12,336 @@ from io import BytesIO
 from urllib.parse import urlparse
 from src.utils.logger import get_logger
 from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
-from openpyxl.utils import get_column_letter
+
+# 엑셀 셀 하나에 들어갈 수 있는 최대 글자 수 (초과 시 엑셀이 파일을 손상으로 인식)
+EXCEL_MAX_CELL_LENGTH = 32000
+# PIL 포맷명 → 실제 확장자
+PIL_FORMAT_TO_EXT = {
+    'JPEG': 'jpg', 'JPG': 'jpg', 'PNG': 'png', 'GIF': 'gif',
+    'WEBP': 'webp', 'BMP': 'bmp', 'TIFF': 'tif', 'ICO': 'ico',
+}
+# 이어받기 기록을 보관하는 폴더 이름 (사이트별로 파일이 하나씩 생긴다)
+HISTORY_DIR_NAME = ".history"
+
 
 class ImageDownloader:
     def __init__(self, config_manager):
         self.logger = get_logger()
         self.config = config_manager
-        
-    def process_images(self, images_data, base_result_dir="results", progress_callback=None, stop_event=None):
+        # 스레드별 requests 세션 보관소 (Session 객체는 스레드 간 공유하지 않는 편이 안전)
+        self._thread_local = threading.local()
+        self._cookies = {}
+
+    # ──────────────────────────────────────────────────────────
+    # 이어받기(중복 방지) 기록 — 사이트별로 분리 저장
+    # ──────────────────────────────────────────────────────────
+    @staticmethod
+    def _safe_hostname(url):
+        """
+        호스트명을 파일명으로 쓸 수 있게 정제 (Path Traversal 방지 포함).
+
+        ⛔ 수정금지(DO NOT MODIFY — INTENDED): 점(.)은 허용하되 '..' 는 반드시 죽인다.
+        무엇: 연속된 점을 _ 로 바꾸고 앞뒤의 점을 떼어낸다.
+        왜:   허용문자에 점이 포함되어 있어서, 주소가 'https://../../etc/passwd' 같은 꼴이면
+              netloc 이 '..' 로 뽑혀 그대로 파일명이 됐다. 지금은 뒤에 '.json' 을 붙이기 때문에
+              '...json' 이라는 이상한 파일이 되어 실제 탈출은 없지만,
+              나중에 이 이름을 '폴더명'으로 쓰는 순간 상위 폴더 탈출이 된다.
+              (정상 도메인 example.com 의 점은 그대로 보존되므로 부작용 없음)
+        건드리면: 파일명 규칙이 바뀔 때 Path Traversal 취약점으로 되살아난다.
+        """
+        hostname = urlparse(url).netloc.replace('www.', '').replace(':', '_')
+        hostname = re.sub(r'[^a-zA-Z0-9\-\.]', '_', hostname)
+        hostname = re.sub(r'\.{2,}', '_', hostname).strip('.')
+        return hostname or "unknown"
+
+    @classmethod
+    def get_history_path(cls, base_result_dir, source_url):
+        """
+        사이트별 이어받기 기록 파일 경로.
+        ⛔ 예전에는 results/download_history.json 하나에 전 사이트를 몰아 넣어서,
+        A사이트를 받고 나면 B사이트 수집에도 영향을 주고 재수집이 아예 불가능했다.
+        반드시 '사이트별'로 분리해서 보관한다.
+        """
+        history_dir = os.path.join(base_result_dir, HISTORY_DIR_NAME)
+        os.makedirs(history_dir, exist_ok=True)
+        return os.path.join(history_dir, f"{cls._safe_hostname(source_url)}.json")
+
+    @classmethod
+    def clear_history(cls, base_result_dir="results"):
+        """
+        이어받기 기록 전체 삭제 (UI의 '이어받기 기록 초기화' 버튼용).
+        Returns: 삭제된 기록 파일 개수
+        """
+        removed = 0
+        history_dir = os.path.join(base_result_dir, HISTORY_DIR_NAME)
+        if os.path.isdir(history_dir):
+            for name in os.listdir(history_dir):
+                if name.endswith(".json"):
+                    try:
+                        os.remove(os.path.join(history_dir, name))
+                        removed += 1
+                    except Exception:
+                        pass
+        # 구버전(전역) 기록 파일도 함께 정리
+        legacy = os.path.join(base_result_dir, "download_history.json")
+        if os.path.exists(legacy):
+            try:
+                os.remove(legacy)
+                removed += 1
+            except Exception:
+                pass
+        return removed
+
+    def _load_history(self, history_path):
+        if not os.path.exists(history_path):
+            return set()
+        try:
+            with open(history_path, 'r', encoding='utf-8') as f:
+                return set(json.load(f))
+        except Exception:
+            return set()
+
+    def _save_history(self, history_path, history):
+        try:
+            with open(history_path, 'w', encoding='utf-8') as f:
+                json.dump(list(history), f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            self.logger.warning(f"Failed to save download history: {e}")
+
+    # ──────────────────────────────────────────────────────────
+    # 네트워크 세션 (수동 로그인 쿠키 재사용)
+    # ──────────────────────────────────────────────────────────
+    def _set_cookies(self, cookies):
+        """
+        셀레니움에서 받은 쿠키 목록을 requests 용 dict 로 변환해 보관한다.
+        ⛔ 이게 없으면 '수동 로그인'으로 로그인해도 이미지 다운로드는 비로그인 상태로
+        요청되어 회원 전용 이미지가 전부 403으로 실패한다.
+        """
+        self._cookies = {}
+        for c in (cookies or []):
+            name, value = c.get('name'), c.get('value')
+            if name and value is not None:
+                self._cookies[name] = value
+        if self._cookies:
+            self.logger.info(f"Reusing {len(self._cookies)} login cookies for image download.")
+
+    def _get_session(self):
+        """스레드별 requests 세션 반환 (쿠키 포함)."""
+        session = getattr(self._thread_local, "session", None)
+        if session is None:
+            session = requests.Session()
+            session.headers.update({
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
+                'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7',
+            })
+            if self._cookies:
+                session.cookies.update(self._cookies)
+            self._thread_local.session = session
+        return session
+
+    # ──────────────────────────────────────────────────────────
+    # 메인 처리
+    # ──────────────────────────────────────────────────────────
+    def process_images(self, images_data, base_result_dir="results", progress_callback=None,
+                       stop_event=None, cookies=None):
         """Downloads images and saves metadata to Excel."""
         if not images_data:
             self.logger.warning("No images to process.")
-            return
+            return None
 
-        import json
-        history_path = os.path.join(base_result_dir, "download_history.json")
-        history = set()
-        if os.path.exists(history_path):
-            try:
-                with open(history_path, 'r', encoding='utf-8') as f:
-                    history = set(json.load(f))
-            except Exception:
-                pass
-                
+        self._set_cookies(cookies)
+
+        first_img = images_data[0]
+        first_source = first_img['source_page']
+
+        # 사이트별 이어받기 기록 로드
+        use_resume = self.config.get("use_resume", True)
+        history_path = self.get_history_path(base_result_dir, first_source)
+        history = self._load_history(history_path) if use_resume else set()
+
         # Filter duplicates (Resume feature)
-        new_images = []
+        images_to_process = []
         skipped_count = 0
         for img in images_data:
             if img['src'] in history:
-                self.logger.debug(f"Skipped {img['filename']}: Already downloaded (이어받기)")
                 skipped_count += 1
                 continue
-            new_images.append(img)
-            
+            images_to_process.append(img)
+
         if skipped_count > 0:
             self.logger.info(f"중복 제외됨: {skipped_count}개의 이미지는 이미 받아져 건너뜁니다. (이어받기)")
-            
-        if not new_images:
+
+        if not images_to_process:
             self.logger.info("모든 이미지가 이미 다운로드되어 있습니다. (이어받기 완료)")
             if progress_callback: progress_callback(1.0)
-            return base_result_dir
-            
-        images_to_process = new_images
+            # ⛔ None 을 반환해 호출부가 '새로 저장된 폴더 없음'을 구분할 수 있게 한다.
+            #    (예전에는 results 최상위 경로를 돌려줘서 엉뚱한 폴더가 열렸다)
+            return None
 
         # Prepare directory: results/[PageTitle]_[Hostname]_[Date]/
-        first_img = images_data[0]
-        first_source = first_img['source_page']
         page_title = first_img.get('page_title', 'Untitled')
-        
+
         # Sanitize title for filesystem
         safe_title = "".join([c for c in page_title if c.isalnum() or c in (' ', '-', '_')]).strip()
         safe_title = safe_title[:30] # Limit length
         if not safe_title:
             safe_title = "Untitled"
 
-        import re
-        hostname = urlparse(first_source).netloc.replace('www.', '').replace(':', '_')
         # 보안 강화: 호스트네임에서 알파벳, 숫자, 점(.), 하이픈(-)만 허용 (Path Traversal 방지)
-        hostname = re.sub(r'[^a-zA-Z0-9\-\.]', '_', hostname)
-        
+        hostname = self._safe_hostname(first_source)
+
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        
+
         # New Format: [Title]_[Domain]_[Time] e.g. "iPhone15Pro_apple.com_20240101..."
         folder_name = f"[{safe_title}]_{hostname}_{timestamp}"
-        
+
         save_dir = os.path.join(base_result_dir, folder_name)
         img_save_dir = os.path.join(save_dir, "images")
         os.makedirs(img_save_dir, exist_ok=True)
-        
+
         self.logger.info(f"Saving results to {save_dir}")
-        self.logger.info(f"Starting parallel download for {len(images_data)} images...")
-        
+        self.logger.info(f"Starting parallel download for {len(images_to_process)} images...")
+
         downloaded_images = []
         total_images = len(images_to_process)
         completed = 0
-        
+
         # PRO Feature: Parallel Downloading (5 workers)
-        with ThreadPoolExecutor(max_workers=5) as executor:
+        executor = ThreadPoolExecutor(max_workers=5)
+        try:
             future_to_img = {
-                executor.submit(self._download_single_image, img, idx, img_save_dir, stop_event): img 
+                executor.submit(self._download_single_image, img, idx, img_save_dir, stop_event): img
                 for idx, img in enumerate(images_to_process)
             }
-            
+
             for future in as_completed(future_to_img):
-                if stop_event and stop_event.is_set():
-                    self.logger.info("Image downloading stopped by user.")
-                    break
                 completed += 1
                 if progress_callback:
                     progress_callback(completed / total_images)
-                
+
                 # Reduce log spam by showing summary instead of every single file
                 if completed % 20 == 0 or completed == total_images:
                     self.logger.info(f"다운로드 진행 중: {completed}/{total_images} ({int(completed/total_images*100)}%)")
-                    
-                result = future.result()
+
+                try:
+                    result = future.result()
+                except Exception as e:
+                    self.logger.debug(f"Download task failed: {e}")
+                    result = None
+
                 if result:
                     downloaded_images.append(result)
                     history.add(result['src'])
-                    
+
+                if stop_event and stop_event.is_set():
+                    # ⛔ 중지 시 '아직 시작되지 않은' 작업들을 즉시 취소한다.
+                    #    (예전에는 with 블록이 남은 작업을 전부 기다려서 중지가 먹히지 않았다)
+                    self.logger.info("Image downloading stopped by user. Cancelling pending tasks...")
+                    for pending in future_to_img:
+                        pending.cancel()
+                    break
+        finally:
+            executor.shutdown(wait=False)
+
         # Save History
-        try:
-            with open(history_path, 'w', encoding='utf-8') as f:
-                json.dump(list(history), f, ensure_ascii=False, indent=2)
-        except Exception as e:
-            self.logger.warning(f"Failed to save download history: {e}")
+        if use_resume:
+            self._save_history(history_path, history)
+
+        if not downloaded_images:
+            self.logger.warning("저장된 이미지가 없습니다. (필터 조건 또는 네트워크 확인 필요)")
+            return None
+
         # Generate Excel Report
         self.create_report(downloaded_images, save_dir)
         return save_dir
 
+    # ──────────────────────────────────────────────────────────
+    # 개별 다운로드
+    # ──────────────────────────────────────────────────────────
+    def _fetch_bytes(self, url, referer, stop_event=None):
+        """HTTP로 이미지를 받아온다. 용량 상한과 Content-Type을 확인한다."""
+        max_bytes = int(self.config.get("max_image_mb", 20)) * 1024 * 1024
+        max_retries = 3
+
+        for attempt in range(max_retries):
+            if stop_event and stop_event.is_set():
+                return None
+            try:
+                session = self._get_session()
+                response = session.get(url, headers={'Referer': referer}, stream=True, timeout=10)
+
+                if response.status_code != 200:
+                    self.logger.debug(f"HTTP {response.status_code} for {url[:80]}")
+                    response.close()
+                else:
+                    content_type = (response.headers.get('Content-Type') or '').lower()
+                    # 이미지가 아닌 응답(HTML 에러 페이지 등)은 즉시 버린다
+                    if content_type and not (content_type.startswith('image/') or 'octet-stream' in content_type):
+                        self.logger.debug(f"Not an image ({content_type}): {url[:80]}")
+                        response.close()
+                        return None
+
+                    # 헤더에 크기가 있으면 먼저 거른다
+                    try:
+                        declared = int(response.headers.get('Content-Length', 0))
+                        if declared and declared > max_bytes:
+                            self.logger.debug(f"Too large ({declared} bytes): {url[:80]}")
+                            response.close()
+                            return None
+                    except (TypeError, ValueError):
+                        pass
+
+                    # 청크 단위로 받으면서 상한을 넘으면 중단 (메모리 폭탄 방지)
+                    buffer = BytesIO()
+                    size = 0
+                    for chunk in response.iter_content(chunk_size=65536):
+                        if stop_event and stop_event.is_set():
+                            response.close()
+                            return None
+                        if not chunk:
+                            continue
+                        size += len(chunk)
+                        if size > max_bytes:
+                            self.logger.debug(f"Aborted oversized download: {url[:80]}")
+                            response.close()
+                            return None
+                        buffer.write(chunk)
+                    response.close()
+                    return buffer.getvalue()
+
+            except Exception as e:
+                # We log the shortened URL to prevent flooding logs with giant URLs
+                self.logger.debug(f"Request error for {url[:80]}: {e}")
+
+            if attempt < max_retries - 1:
+                time.sleep(2 ** attempt)
+
+        return None
+
     def _download_single_image(self, img, idx, save_dir, stop_event=None):
         """Downloads a single image, supporting both URLs and Data URIs (Base64)."""
         url = img['src']
-        filename = f"{idx+1:03d}_{img['filename']}"
-        filepath = os.path.join(save_dir, filename)
-        
+        stem = f"{idx+1:03d}_{img['filename']}"
+
         image_content = None
-        
+
         # --- Step 1: Retrieve Content ---
         if url.startswith('data:image/'):
             # Support for embedded Base64 images
             try:
                 import base64
-                if ',' in url:
-                    header, encoded = url.split(',', 1)
-                    image_content = base64.b64decode(encoded)
-                else:
+                if ',' not in url:
                     return None
+                header, encoded = url.split(',', 1)
+                if ';base64' not in header:
+                    return None
+                image_content = base64.b64decode(encoded)
             except Exception as e:
-                self.logger.debug(f"Failed to decode base64 for {filename[:20]}: {e}")
+                self.logger.debug(f"Failed to decode base64 for {stem}: {e}")
                 return None
         else:
-            # Smart Retry logic for standard HTTP downloads
-            max_retries = 3
-            for attempt in range(max_retries):
-                if stop_event and stop_event.is_set():
-                    return None
-                try:
-                    headers = {
-                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                        'Referer': img['source_page']
-                    }
-                    response = requests.get(url, headers=headers, stream=True, timeout=10)
-                    if response.status_code == 200:
-                        image_content = response.content
-                        break # Success, exit retry loop
-                    else:
-                        self.logger.debug(f"Failed {filename[:15]}... (Status {response.status_code})")
-                except Exception as e:
-                    # We log the shortened URL or filename to prevent flooding logs with giant URLs
-                    self.logger.debug(f"Request error for {filename[:20]}: {e}")
-                
-                if attempt < max_retries - 1:
-                    time.sleep(2 ** attempt)
+            image_content = self._fetch_bytes(url, img.get('source_page', url), stop_event)
 
         if not image_content:
             return None
@@ -170,25 +350,28 @@ class ImageDownloader:
         try:
             # Check constraints
             image = Image.open(BytesIO(image_content))
+            image.verify()  # 깨진 파일 조기 차단
+            image = Image.open(BytesIO(image_content))  # verify() 후에는 재오픈 필요
+
             min_width = self.config.get("min_width", 0)
             min_height = self.config.get("min_height", 0)
-            
+
             if image.width < min_width or image.height < min_height:
-                self.logger.debug(f"Skipped {filename}: Too small ({image.width}x{image.height})")
+                self.logger.debug(f"Skipped {stem}: Too small ({image.width}x{image.height})")
                 return None
-                
-            # Safe filename patch if extension doesn't match base64 source
-            if url.startswith('data:image/') and '.' not in filename:
-                 # Try to deduce from PIL format
-                 filepath += f".{image.format.lower()}" if image.format else ".jpg"
+
+            # ⛔ 확장자는 '실제 이미지 포맷' 기준으로 붙인다.
+            #    예전에는 URL에 확장자가 없으면 무조건 .jpg 를 붙여 PNG가 .jpg로 저장됐다.
+            ext = PIL_FORMAT_TO_EXT.get((image.format or '').upper(), 'jpg')
+            filename = f"{stem}.{ext}"
+            filepath = os.path.join(save_dir, filename)
 
             # Write raw image data
             with open(filepath, 'wb') as f:
                 f.write(image_content)
-            
+
             # Save supporting text metadata
-            txt_filename = os.path.splitext(filename)[0] + ".txt"
-            txt_filepath = os.path.join(save_dir, txt_filename)
+            txt_filepath = os.path.join(save_dir, f"{stem}.txt")
             try:
                 with open(txt_filepath, "w", encoding="utf-8") as f:
                     f.write(f"파일이름: {filename}\n")
@@ -204,73 +387,86 @@ class ImageDownloader:
                 pass # Non-critical failure
 
             # Add tracking metadata
-            img['saved_filename'] = os.path.basename(filepath)
+            img['saved_filename'] = filename
             img['resolution'] = f"{image.width}x{image.height}"
-            self.logger.debug(f"Successfully saved: {img['saved_filename']}")
+            self.logger.debug(f"Successfully saved: {filename}")
             return img
-            
+
         except Exception as e:
-            self.logger.debug(f"Processing failed for {filename[:20]}: {e}")
+            self.logger.debug(f"Processing failed for {stem}: {e}")
             return None
 
-
+    # ──────────────────────────────────────────────────────────
+    # 엑셀 리포트
+    # ──────────────────────────────────────────────────────────
     def create_report(self, images_data, output_dir):
         """Creates an Excel report from value data."""
         if not images_data:
             return
-            
+
         df = pd.DataFrame(images_data)
-        
+
         # Select and Reorder columns
         columns = ['saved_filename', 'heading', 'description', 'context', 'src', 'resolution', 'source_page']
         for col in columns:
             if col not in df.columns:
                 df[col] = ""
-                
+
         # Add scrape time
         df['scrape_time'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         columns.append('scrape_time')
-                
-        df = df[columns]
+
+        df = df[columns].copy()
+
+        # ⛔ 엑셀은 셀 하나에 32,767자를 넘으면 '파일 손상'으로 인식한다.
+        #    Base64 이미지 주소는 수만 자가 되므로 반드시 잘라서 넣는다.
+        def _shorten(value):
+            text = str(value) if value is not None else ""
+            if len(text) > EXCEL_MAX_CELL_LENGTH:
+                return text[:EXCEL_MAX_CELL_LENGTH] + " ...(생략됨)"
+            return text
+
+        for col in df.columns:
+            df[col] = df[col].map(_shorten)
+
         df.columns = [
-            '수집된 파일명', 
-            '소속 문단 제목 (주제 파악용)', 
-            '이미지 자체 설명 (Alt/Title 등)', 
-            '주변 텍스트 문맥 (본문 내용)', 
-            '실제 다운로드 통로 URL', 
-            '해상도', 
-            '출처 페이지 사이트', 
+            '수집된 파일명',
+            '소속 문단 제목 (주제 파악용)',
+            '이미지 자체 설명 (Alt/Title 등)',
+            '주변 텍스트 문맥 (본문 내용)',
+            '실제 다운로드 통로 URL',
+            '해상도',
+            '출처 페이지 사이트',
             '수집 일시'
         ]
-        
+
         excel_path = os.path.join(output_dir, "checklist.xlsx")
         try:
             # Save using Pandas
             with pd.ExcelWriter(excel_path, engine='openpyxl') as writer:
                 df.to_excel(writer, index=False, sheet_name='수집 결과')
-                
+
                 # Format using openpyxl
-                workbook = writer.book
                 worksheet = writer.sheets['수집 결과']
-                
+
                 header_font = Font(bold=True, color="FFFFFF")
                 header_fill = PatternFill(start_color="4F81BD", end_color="4F81BD", fill_type="solid")
                 thin_border = Border(left=Side(style='thin'), right=Side(style='thin'), top=Side(style='thin'), bottom=Side(style='thin'))
                 center_alignment = Alignment(horizontal="center", vertical="center")
                 wrap_alignment = Alignment(wrap_text=True, vertical="center")
-                
+
                 # Format Headers
                 for col_num, cell in enumerate(worksheet[1], 1):
                     cell.font = header_font
                     cell.fill = header_fill
                     cell.alignment = center_alignment
                     cell.border = thin_border
-                    
+
                 # Format Data Cells & Auto-width
                 column_widths = {'A': 25, 'B': 35, 'C': 40, 'D': 50, 'E': 40, 'F': 15, 'G': 40, 'H': 20}
                 for col_letter, width in column_widths.items():
                     worksheet.column_dimensions[col_letter].width = width
-                    
+
                 for row in worksheet.iter_rows(min_row=2):
                     for idx, cell in enumerate(row):
                         cell.border = thin_border

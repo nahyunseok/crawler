@@ -23,7 +23,11 @@ wheels/
 
 # Virtual Environment
 venv/
+.venv/
 .env
+
+# Test / 품질점검 캐시 (tools/preflight.py 가 pytest 를 돌릴 때 생긴다)
+.pytest_cache/
 
 # Project Specific
 results/

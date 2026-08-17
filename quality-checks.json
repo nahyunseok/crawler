@@ -1,0 +1,36 @@
+{
+  "_설명": "빌드 전 필수 품질점검(tools/preflight.py)의 프로젝트 성질 선언 — Gemini Image Crawler",
+  "_성질_판단근거": {
+    "desktop-exe": "PyInstaller onedir 로 exe 배포. 운영 중 exe 가 dist/ 를 잠그면 clean_build() 의 rmtree 가 실패한다",
+    "gui": "customtkinter 데스크탑 UI (사이드바 라이선스 표시·진행바)",
+    "local-json-store": "settings.json / license_cache.json / results/.history/<도메인>.json 3종을 로컬 파일로 저장",
+    "multi-thread": "수집은 백그라운드 스레드, 다운로드는 ThreadPoolExecutor(5) + 스레드별 requests 세션",
+    "platform-bot": "외부 사이트를 크롤링하며 수동 로그인 세션을 재사용 — 속도가 빨라지면 IP 차단·계정 정지 위험",
+    "legacy-settings": "기존 고객 PC에 구버전 settings.json 과 '무서명' 라이선스 캐시가 남아 있다",
+    "_제외_scheduler": "예약·반복 실행 기능이 없다",
+    "_제외_server": "로컬 1인용 데스크탑 앱이라 전역수칙 12의 서버급 장치(멱등성 키 등) 적용 대상이 아니다"
+  },
+  "_exe_name_생략_이유": [
+    "이 프로젝트의 exe 이름에는 버전이 붙는다(Gemini_Image_Crawler_v1.0.16.exe).",
+    "러너 내장 검사는 IMAGENAME 완전일치라 버전이 바뀌면 검사가 조용히 통과해버린다(가짜 안심).",
+    "그래서 exe_name 을 비우고, 대신 프리픽스로 모든 버전을 잡는",
+    "tests/preflight/test_preflight_desktop_exe.py 를 suites 에 선언해 더 강하게 검사한다."
+  ],
+  "traits": [
+    "desktop-exe",
+    "gui",
+    "local-json-store",
+    "multi-thread",
+    "platform-bot",
+    "legacy-settings"
+  ],
+  "regression": "tests",
+  "suites": {
+    "desktop-exe": ["tests/preflight/test_preflight_desktop_exe.py"],
+    "local-json-store": ["tests/preflight/test_preflight_local_json_store.py"],
+    "multi-thread": ["tests/preflight/test_preflight_multi_thread.py"],
+    "platform-bot": ["tests/preflight/test_preflight_platform_bot.py"],
+    "legacy-settings": ["tests/preflight/test_preflight_legacy_settings.py"]
+  },
+  "skip_log": "troubleshooting/preflight-skips.log"
+}

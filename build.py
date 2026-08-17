@@ -1,5 +1,6 @@
 import os
 import sys
+import glob
 import shutil
 import subprocess
 
@@ -30,19 +31,26 @@ def bump_version():
     return new_version
 
 def clean_build():
+    """이전 빌드 잔재를 모두 지운다 (전역수칙 10: 클린 빌드)."""
     print("🧹 Cleaning previous builds...")
     dirs_to_clean = ["build", "dist"]
-    files_to_clean = ["main.spec"]
-    
+
     for d in dirs_to_clean:
         if os.path.exists(d):
             shutil.rmtree(d)
             print(f"Removed directory: {d}")
-            
-    for f in files_to_clean:
-        if os.path.exists(f):
-            os.remove(f)
-            print(f"Removed file: {f}")
+
+    # PyInstaller 가 남기는 .spec 파일 (버전이 올라갈수록 계속 쌓인다)
+    for f in glob.glob("*.spec"):
+        os.remove(f)
+        print(f"Removed file: {f}")
+
+    # 파이썬 캐시도 함께 정리 (구버전 코드가 exe 에 섞여 들어가는 사고 방지)
+    for root, dirs, _files in os.walk("."):
+        for d in list(dirs):
+            if d == "__pycache__":
+                shutil.rmtree(os.path.join(root, d), ignore_errors=True)
+                dirs.remove(d)
 
 def build_exe(version):
     print(f"🚀 Building executable (v{version})...")
@@ -143,7 +151,37 @@ def generate_git_command(version):
     print(tag_command)
     print("="*50 + "\n")
 
+def run_preflight():
+    """
+    빌드 전 필수 품질점검 게이트 (전역수칙 10).
+
+    ⛔ 수정금지(DO NOT MODIFY / DO NOT REMOVE — INTENDED)
+    무엇: clean_build() 와 bump_version() 보다 '먼저' 실행한다.
+    왜:   ① 점검 실패 시 버전이 올라가 있으면 version.txt 를 손으로 되돌려야 한다.
+          ② dist/ 를 지운 뒤에 실패하면 이전 배포판까지 잃는다.
+          ③ 배포판 exe 가 실행 중이면 dist/ 가 잠겨 rmtree 가 깨지는데,
+             게이트가 그것을 먼저 잡아준다.
+    건드리면: 실패한 빌드가 버전만 올리고 산출물은 없는 상태로 끝난다.
+
+    통과 못 하면 빌드를 중단한다. 정말 급하면 사용자가 직접:
+        python tools/preflight.py --skip "긴급 핫픽스 사유"
+    """
+    gate = os.path.join("tools", "preflight.py")
+    if not os.path.exists(gate):
+        print("⚠️ tools/preflight.py 가 없어 품질점검을 건너뜁니다 (게이트 설치를 권장).")
+        return
+
+    print("🛫 빌드 전 품질점검(Preflight)을 실행합니다...\n")
+    result = subprocess.run([sys.executable, gate, *sys.argv[1:]])
+    if result.returncode != 0:
+        print("\n⛔ 품질점검을 통과하지 못해 빌드를 중단합니다.")
+        print("   (위 ❌ 항목을 해결한 뒤 다시 실행하세요. 버전은 올라가지 않았습니다)")
+        sys.exit(1)
+    print()
+
+
 if __name__ == "__main__":
+    run_preflight()
     clean_build()
     new_version = bump_version()
     print(f"📈 Version bumped to: {new_version}")

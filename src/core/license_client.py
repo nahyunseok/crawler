@@ -7,6 +7,8 @@ import sys
 import uuid
 import json
 import os
+import base64
+import hmac
 import platform
 import hashlib
 from datetime import datetime
@@ -16,10 +18,16 @@ from src.utils.logger import get_logger
 
 class OnlineLicenseClient:
     """구글 스프레드시트 기반 온라인 라이선스 인증 클라이언트"""
-    
+
     # 앱 정보 (appdirs 기반 안전한 경로 사용)
     APP_NAME = "GeminiImageCrawler"
     APP_AUTHOR = "User"
+
+    # 캐시 서명용 내부 시크릿.
+    # ⛔ 이것만으로 완전한 보안이 되지는 않지만(클라이언트 프로그램의 한계),
+    #    HWID와 조합해 HMAC 서명을 만들기 때문에 '캐시 파일을 손으로 위조해서
+    #    무기한 사용'하는 가장 흔한 크랙 경로는 막을 수 있다.
+    _CACHE_SECRET = "GeminiImageCrawler::license-cache::v2"
     
     def __init__(self, script_url=None):
         self.logger = get_logger()
@@ -103,17 +111,110 @@ class OnlineLicenseClient:
                 
             return result
             
-        except requests.exceptions.ConnectionError:
-            # 인터넷 연결 실패 시 → 로컬 캐시로 대체
-            self.logger.warning("Server connection failed. Checking local cache...")
+        except ValueError as e:
+            # 서버가 JSON이 아닌 응답(구글 로그인/오류 HTML 페이지 등)을 준 경우.
+            # ⛔ 이 블록은 반드시 RequestException 보다 '위'에 있어야 한다.
+            #    requests 의 JSONDecodeError 는 ValueError 와 RequestException 을 동시에
+            #    상속하므로, 순서가 바뀌면 JSON 오류가 '연결 실패'로 잘못 안내된다.
+            #    (서버 이상이므로 캐시가 유효하면 그대로 통과시켜 준다)
+            self.logger.error(f"License server returned invalid response: {e}")
             cached = self._check_cache(license_key)
             if cached:
                 return cached
-            return {"valid": False, "message": "서버 연결 실패. 인터넷을 확인해주세요.", "data": None}
-            
+            return {
+                "valid": False,
+                "message": "라이선스 서버 응답을 해석할 수 없습니다.\n잠시 후 다시 시도해주세요.",
+                "data": None,
+            }
+
+        except requests.exceptions.RequestException as e:
+            # 네트워크 문제 전반(연결 실패·응답 지연·SSL 오류 등) → 로컬 캐시로 대체
+            #
+            # ⛔ 수정금지(DO NOT MODIFY — INTENDED)
+            # 무엇: ConnectionError 하나만 잡지 않고 RequestException(상위 클래스)으로 받는다.
+            # 왜:   requests.exceptions.ReadTimeout 은 ConnectionError 의 하위 클래스가 아니다.
+            #       예전에는 ConnectionError 만 잡아서, 네트워크가 '느린' 경우(구글 Apps Script가
+            #       10초 안에 응답하지 못한 경우)에 오프라인 캐시 폴백이 전혀 동작하지 않고
+            #       '인증 오류'로 튕겨 정상 사용자가 프로그램을 못 켰다.
+            # 건드리면: 지하철·공용 와이파이 등 느린 회선에서 인증 실패 문의가 다시 발생한다.
+            self.logger.warning(f"License server unreachable ({type(e).__name__}). Checking local cache...")
+            cached = self._check_cache(license_key)
+            if cached:
+                return cached
+            return {
+                "valid": False,
+                "message": "라이선스 서버에 연결할 수 없습니다.\n인터넷 연결을 확인한 뒤 다시 시도해주세요.",
+                "data": None,
+            }
+
         except Exception as e:
             self.logger.error(f"License verification error: {e}")
             return {"valid": False, "message": f"인증 오류: {str(e)}", "data": None}
+
+    # ──────────────────────────────────────────────────────────
+    # 캐시 암호화/서명 (위조 방지)
+    # ──────────────────────────────────────────────────────────
+    def _cache_signing_key(self) -> bytes:
+        """서명 키 = 내부 시크릿 + 이 PC의 HWID (다른 PC로 복사하면 서명이 깨진다)"""
+        return hashlib.sha256(f"{self._CACHE_SECRET}:{self.hwid}".encode('utf-8')).digest()
+
+    def _sign(self, payload: str) -> str:
+        return hmac.new(self._cache_signing_key(), payload.encode('utf-8'), hashlib.sha256).hexdigest()
+
+    def _encode_cache(self, cache_data: dict) -> str:
+        """캐시 데이터를 서명 + Base64로 감싼다."""
+        payload = json.dumps(cache_data, ensure_ascii=False, sort_keys=True)
+        envelope = {"payload": payload, "sig": self._sign(payload)}
+        return base64.b64encode(json.dumps(envelope).encode('utf-8')).decode('utf-8')
+
+    def _decode_cache(self, content: str):
+        """
+        캐시 파일을 해독하고 서명을 검증한다.
+        ⛔ 서명이 없거나 어긋나면 무조건 무효 처리한다.
+           (예전 버전은 Base64 인코딩만 해서, 만료일을 마음대로 고쳐 넣은
+            캐시 파일로 영구 무료 사용이 가능했다)
+        Returns: dict or None
+        """
+        if not content:
+            return None
+        try:
+            decoded = base64.b64decode(content).decode('utf-8')
+            envelope = json.loads(decoded)
+        except Exception:
+            # 구버전 평문/무서명 캐시 → 신뢰할 수 없으므로 폐기 (재인증 유도)
+            self.logger.warning("Unsigned or unreadable license cache detected. Re-activation required.")
+            return None
+
+        if not isinstance(envelope, dict) or "payload" not in envelope or "sig" not in envelope:
+            self.logger.warning("License cache has no signature. Re-activation required.")
+            return None
+
+        payload = envelope.get("payload", "")
+        if not hmac.compare_digest(self._sign(payload), envelope.get("sig", "")):
+            self.logger.warning("License cache signature mismatch (tampered or copied).")
+            return None
+
+        try:
+            return json.loads(payload)
+        except Exception:
+            return None
+
+    def _read_cache_file(self):
+        """캐시 파일을 읽어 검증된 dict 를 반환 (없거나 위조면 None)."""
+        try:
+            if not os.path.exists(self.cache_file):
+                return None
+            with open(self.cache_file, "r", encoding="utf-8") as f:
+                return self._decode_cache(f.read().strip())
+        except Exception:
+            return None
+
+    def get_cached_key(self):
+        """인증창에서 이전에 쓰던 키를 미리 채워 넣기 위한 조회용."""
+        cache = self._read_cache_file()
+        if cache:
+            return cache.get("key", "")
+        return ""
 
     def _save_cache(self, key, result):
         """오프라인 연결 대비 인증 정보 캐싱"""
@@ -140,15 +241,14 @@ class OnlineLicenseClient:
                 "data": result.get("data")
             }
             
-            # 보안 강화: JSON 데이터를 HWID 기반으로 간단히 인코딩하여 평문 노출 방지
-            json_str = json.dumps(cache_data, ensure_ascii=False, indent=2)
-            import base64
-            # 간단한 XOR 및 Base64 인코딩 (보안 레이어 추가)
-            encoded = base64.b64encode(json_str.encode('utf-8')).decode('utf-8')
-            
+            # 보안 강화: HWID 기반 HMAC 서명 + Base64 인코딩
+            # (평문 노출 방지 + 파일 위조 시 즉시 탐지)
+            encoded = self._encode_cache(cache_data)
+
             with open(self.cache_file, "w", encoding="utf-8") as f:
                 f.write(encoded)
-                
+
+
         except Exception as e:
             self.logger.warning(f"Failed to save license cache: {e}")
 
@@ -161,25 +261,10 @@ class OnlineLicenseClient:
             dict or None: 유효한 캐시 데이터 반환, 무효하면 None
         """
         try:
-            if not os.path.exists(self.cache_file):
+            cache = self._read_cache_file()
+            if not cache:
                 return None
-                
-            with open(self.cache_file, "r", encoding="utf-8") as f:
-                content = f.read().strip()
-                
-            # Base64 디코딩 시도 (암호화된 데이터인 경우)
-            import base64
-            try:
-                decoded = base64.b64decode(content).decode('utf-8')
-                cache = json.loads(decoded)
-            except Exception:
-                # 구버전(평문)인 경우 호환성을 위해 시도
-                try:
-                    cache = json.loads(content)
-                except Exception:
-                    return None
 
-                
             # 1. 기기 ID 일치 확인 (다른 PC에서 복사한 캐시 차단)
             if cache.get("hwid") and cache["hwid"] != self.hwid:
                 self.logger.warning("License cache HWID mismatch. Invalidating.")
@@ -206,12 +291,13 @@ class OnlineLicenseClient:
     def _check_cache(self, key):
         """캐시된 라이선스 확인 (오프라인/Fallback 용)"""
         try:
-            if not os.path.exists(self.cache_file):
+            # ⛔ 반드시 _read_cache_file() 을 써야 한다.
+            #    캐시를 서명+Base64로 저장하도록 바꾼 뒤에도 여기만 평문 json.load 를
+            #    쓰고 있어서, 오프라인 인증 폴백이 항상 실패하던 버그가 있었다.
+            cache = self._read_cache_file()
+            if not cache:
                 return None
-                
-            with open(self.cache_file, "r", encoding="utf-8") as f:
-                cache = json.load(f)
-                
+
             # 기기 ID 일치 확인
             if cache.get("hwid") and cache["hwid"] != self.hwid:
                 return None

@@ -1,0 +1,7 @@
+# 개발·빌드 전용 의존성 (배포판 exe 에는 포함되지 않는다)
+#
+# build.py 가 빌드 전에 tools/preflight.py(품질점검 게이트)를 호출하고,
+# 그 게이트가 pytest 로 회귀 테스트를 돌린다. 새 PC에서 빌드하려면 이것부터 설치할 것:
+#     pip install -r requirements.txt -r requirements-dev.txt
+pytest>=8.0
+pyinstaller>=6.0
