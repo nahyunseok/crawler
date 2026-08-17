@@ -22,11 +22,8 @@
     "use_pagination": true,
     "pagination_selector": "",
     "max_pagination_pages": 30,
-    "allowed_extensions": [
-        ".jpg",
-        ".jpeg",
-        ".png",
-        ".webp"
-    ],
+    "use_scope": false,
+    "scope_selector": "",
+    "crawl_depth": 1,
     "max_scrolls": 0
 }

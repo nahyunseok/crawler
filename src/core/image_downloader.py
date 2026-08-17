@@ -11,6 +11,7 @@ from PIL import Image
 from io import BytesIO
 from urllib.parse import urlparse
 from src.utils.logger import get_logger
+from src.utils.config_manager import allowed_extensions
 from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 
 # 엑셀 셀 하나에 들어갈 수 있는 최대 글자 수 (초과 시 엑셀이 파일을 손상으로 인식)
@@ -30,7 +31,11 @@ class ImageDownloader:
         self.config = config_manager
         # 스레드별 requests 세션 보관소 (Session 객체는 스레드 간 공유하지 않는 편이 안전)
         self._thread_local = threading.local()
-        self._cookies = {}
+        # 건너뛴 이유별 집계 (여러 스레드가 함께 올리므로 잠금이 필요하다)
+        self._skip_counts = {}
+        self._skip_lock = threading.Lock()
+        # 도메인·경로가 포함된 쿠키 항목 목록 (이름/값만 담으면 모든 호스트로 전송된다 — _set_cookies 참조)
+        self._cookie_items = []
 
     # ──────────────────────────────────────────────────────────
     # 이어받기(중복 방지) 기록 — 사이트별로 분리 저장
@@ -92,6 +97,28 @@ class ImageDownloader:
                 pass
         return removed
 
+    def _note_skip(self, reason):
+        """
+        이미지를 건너뛴 이유를 집계한다.
+
+        ⛔ 수정금지(DO NOT MODIFY — INTENDED)
+        무엇: 다운로드 워커가 이미지를 버릴 때마다 이유를 세어 둔다.
+        왜:   예전에는 '이미지 8개 발견 → 7개 저장' 처럼 숫자가 줄어도 이유를 알려주지 않았다.
+              사용자는 나머지 1개가 크기 미달인지, 확장자 때문인지, 네트워크 실패인지 알 수 없어
+              필터를 어떻게 고쳐야 할지 판단할 수 없었다(침묵 축소).
+        건드리면: 수집 결과가 줄어든 이유를 다시 알 수 없게 된다.
+        """
+        with self._skip_lock:
+            self._skip_counts[reason] = self._skip_counts.get(reason, 0) + 1
+
+    def _skip_summary(self):
+        """건너뛴 이유를 사람이 읽을 수 있는 한 줄로 만든다. 없으면 빈 문자열."""
+        with self._skip_lock:
+            if not self._skip_counts:
+                return ""
+            항목 = sorted(self._skip_counts.items(), key=lambda kv: -kv[1])
+        return ", ".join(f"{이유} {개수}개" for 이유, 개수 in 항목)
+
     def _load_history(self, history_path):
         if not os.path.exists(history_path):
             return set()
@@ -102,9 +129,22 @@ class ImageDownloader:
             return set()
 
     def _save_history(self, history_path, history):
+        """
+        이어받기 기록을 저장한다.
+
+        ⛔ 수정금지(DO NOT MODIFY — INTENDED): 설정 파일과 '같은 방식'으로
+           임시 파일에 다 쓴 뒤 os.replace 로 원자적으로 교체한다.
+        왜: 원본에 직접 쓰다가 프로그램이 강제 종료되면 JSON 이 반쪽만 남아 기록을 못 읽고,
+            그러면 이미 받은 이미지를 전부 다시 받는다(수백 MB 재다운로드).
+            설정 파일은 이미 이 방식으로 고쳤는데 기록 파일만 예전 방식이라 일관성이 없었다.
+        """
         try:
-            with open(history_path, 'w', encoding='utf-8') as f:
-                json.dump(list(history), f, ensure_ascii=False, indent=2)
+            tmp_path = f"{history_path}.tmp"
+            with open(tmp_path, 'w', encoding='utf-8') as f:
+                json.dump(sorted(history), f, ensure_ascii=False, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, history_path)
         except Exception as e:
             self.logger.warning(f"Failed to save download history: {e}")
 
@@ -113,17 +153,37 @@ class ImageDownloader:
     # ──────────────────────────────────────────────────────────
     def _set_cookies(self, cookies):
         """
-        셀레니움에서 받은 쿠키 목록을 requests 용 dict 로 변환해 보관한다.
+        셀레니움에서 받은 쿠키를 requests 가 쓸 수 있는 형태로 보관한다.
+
         ⛔ 이게 없으면 '수동 로그인'으로 로그인해도 이미지 다운로드는 비로그인 상태로
-        요청되어 회원 전용 이미지가 전부 403으로 실패한다.
+           요청되어 회원 전용 이미지가 전부 403으로 실패한다.
+
+        ⛔ 수정금지(DO NOT MODIFY — INTENDED): 반드시 '도메인 정보를 살려서' 보관한다.
+        무엇: {이름: 값} 딕셔너리가 아니라 도메인·경로가 포함된 쿠키 항목으로 저장한다.
+        왜:   예전에는 이름/값만 뽑아 세션에 그대로 넣었다. 그러면 requests 가 그 쿠키를
+              '모든 호스트'에 보낸다. 즉 로그인 세션 쿠키가 이미지가 걸려 있는 외부 CDN,
+              광고·추적 도메인까지 함께 전송됐다(세션 탈취 위험이 있는 개인정보 유출).
+              도메인을 살려 두면 requests 가 스스로 해당 도메인에만 보낸다.
+        건드리면: 로그인 쿠키가 제3자 서버로 새어 나간다.
         """
-        self._cookies = {}
+        self._cookie_items = []
         for c in (cookies or []):
             name, value = c.get('name'), c.get('value')
-            if name and value is not None:
-                self._cookies[name] = value
-        if self._cookies:
-            self.logger.info(f"Reusing {len(self._cookies)} login cookies for image download.")
+            if not name or value is None:
+                continue
+            self._cookie_items.append({
+                "name": name,
+                "value": value,
+                # 셀레니움 쿠키의 도메인은 앞에 점이 붙는 경우가 있다(.example.com) — 그대로 둔다.
+                "domain": c.get('domain') or '',
+                "path": c.get('path') or '/',
+            })
+        if self._cookie_items:
+            도메인들 = sorted({item["domain"] for item in self._cookie_items if item["domain"]})
+            self.logger.info(
+                f"Reusing {len(self._cookie_items)} login cookies for image download "
+                f"(scoped to: {', '.join(도메인들) or 'request host'})"
+            )
 
     def _get_session(self):
         """스레드별 requests 세션 반환 (쿠키 포함)."""
@@ -135,8 +195,16 @@ class ImageDownloader:
                 'Accept': 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
                 'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7',
             })
-            if self._cookies:
-                session.cookies.update(self._cookies)
+            # 도메인·경로를 지정해 넣으면 requests 가 해당 도메인에만 쿠키를 보낸다
+            for item in self._cookie_items:
+                try:
+                    session.cookies.set(
+                        item["name"], item["value"],
+                        domain=item["domain"], path=item["path"]
+                    )
+                except Exception:
+                    # 도메인 형식이 이상한 쿠키 하나 때문에 다운로드 전체가 멈추면 안 된다
+                    self.logger.debug(f"Skipped malformed cookie: {item['name']}")
             self._thread_local.session = session
         return session
 
@@ -144,8 +212,15 @@ class ImageDownloader:
     # 메인 처리
     # ──────────────────────────────────────────────────────────
     def process_images(self, images_data, base_result_dir="results", progress_callback=None,
-                       stop_event=None, cookies=None):
-        """Downloads images and saves metadata to Excel."""
+                       stop_event=None, cookies=None, message_callback=None):
+        """
+        이미지를 내려받고 엑셀 리포트를 만든다.
+
+        progress_callback: 진행률(0.0~1.0) 을 받는다.
+        message_callback:  사용자에게 보여줄 안내 문구를 받는다.
+                           ⛔ 이 통로가 없으면 '몇 개를 왜 건너뛰었는지'가 로그 파일에만 남아
+                              사용자는 결과가 줄어든 이유를 알 수 없다(침묵 축소).
+        """
         if not images_data:
             self.logger.warning("No images to process.")
             return None
@@ -156,15 +231,20 @@ class ImageDownloader:
         first_source = first_img['source_page']
 
         # 사이트별 이어받기 기록 로드
+        # ⛔ 수정금지(DO NOT MODIFY — INTENDED): 기록은 '항상' 읽고 '항상' 저장한다.
+        #    use_resume 는 '건너뛸지 말지'만 결정한다.
+        #    예전에는 use_resume 이 꺼져 있으면 빈 기록으로 시작하고 저장도 건너뛰어서,
+        #    ① 이번에 받은 것이 기록에 남지 않아 나중에 이어받기를 켜면 또 받았고
+        #    ② 빈 기록을 그대로 저장하는 코드로 바뀌면 기존 기록이 통째로 날아갈 위험이 있었다.
         use_resume = self.config.get("use_resume", True)
         history_path = self.get_history_path(base_result_dir, first_source)
-        history = self._load_history(history_path) if use_resume else set()
+        history = self._load_history(history_path)
 
         # Filter duplicates (Resume feature)
         images_to_process = []
         skipped_count = 0
         for img in images_data:
-            if img['src'] in history:
+            if use_resume and img['src'] in history:
                 skipped_count += 1
                 continue
             images_to_process.append(img)
@@ -244,9 +324,18 @@ class ImageDownloader:
         finally:
             executor.shutdown(wait=False)
 
-        # Save History
-        if use_resume:
-            self._save_history(history_path, history)
+        # Save History — 이어받기를 껐더라도 '무엇을 받았는지'는 남긴다 (위 주석 참조)
+        self._save_history(history_path, history)
+
+        # 건너뛴 이유 요약을 사용자에게 알린다 (숫자가 줄어든 이유를 반드시 밝힌다)
+        요약 = self._skip_summary()
+        if 요약:
+            self.logger.info(f"Skipped images — {요약}")
+            if message_callback:
+                message_callback(
+                    f"ℹ️ {len(downloaded_images)}개 저장 / {total_images}개 시도 — "
+                    f"건너뛴 이유: {요약}"
+                )
 
         if not downloaded_images:
             self.logger.warning("저장된 이미지가 없습니다. (필터 조건 또는 네트워크 확인 필요)")
@@ -339,11 +428,14 @@ class ImageDownloader:
                 image_content = base64.b64decode(encoded)
             except Exception as e:
                 self.logger.debug(f"Failed to decode base64 for {stem}: {e}")
+                self._note_skip("페이지 내장 이미지 해독 실패")
                 return None
         else:
             image_content = self._fetch_bytes(url, img.get('source_page', url), stop_event)
 
         if not image_content:
+            if not (stop_event and stop_event.is_set()):
+                self._note_skip("내려받기 실패(네트워크·차단·형식)")
             return None
 
         # --- Step 2: Validate, Save & Process ---
@@ -358,11 +450,24 @@ class ImageDownloader:
 
             if image.width < min_width or image.height < min_height:
                 self.logger.debug(f"Skipped {stem}: Too small ({image.width}x{image.height})")
+                self._note_skip(f"최소 크기({min_width}x{min_height}) 미달")
                 return None
 
             # ⛔ 확장자는 '실제 이미지 포맷' 기준으로 붙인다.
             #    예전에는 URL에 확장자가 없으면 무조건 .jpg 를 붙여 PNG가 .jpg로 저장됐다.
             ext = PIL_FORMAT_TO_EXT.get((image.format or '').upper(), 'jpg')
+
+            # ⛔ 수정금지(DO NOT MODIFY — INTENDED): 실제 포맷도 허용 확장자 목록으로 검사한다.
+            # 왜: 크롤러 단계의 검사는 '주소에 확장자가 있을 때'만 동작한다. 그래서
+            #     /photo?id=1 처럼 확장자 없는 주소는 필터를 그냥 통과했고, 내려받아 보니
+            #     GIF 인데도 GIF 체크를 껐는지 여부와 무관하게 .gif 로 저장됐다.
+            #     화면의 체크박스와 실제로 저장되는 파일이 어긋나던 원인이다.
+            allowed = allowed_extensions(self.config)
+            if f".{ext}" not in allowed:
+                self.logger.debug(f"Skipped {stem}: format .{ext} not in allowed extensions {allowed}")
+                self._note_skip(f"허용하지 않는 형식(.{ext})")
+                return None
+
             filename = f"{stem}.{ext}"
             filepath = os.path.join(save_dir, filename)
 
@@ -394,6 +499,7 @@ class ImageDownloader:
 
         except Exception as e:
             self.logger.debug(f"Processing failed for {stem}: {e}")
+            self._note_skip("이미지가 아니거나 파일이 손상됨")
             return None
 
     # ──────────────────────────────────────────────────────────

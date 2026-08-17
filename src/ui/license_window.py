@@ -3,7 +3,7 @@
 Golden_Keyword 프로젝트에서 이식 후 Gemini Image Crawler에 맞게 조정
 """
 import customtkinter as ctk
-from tkinter import messagebox
+from src.ui.dialogs import show_warning, show_error, show_success, ask_yes_no
 from datetime import datetime
 import os
 import sys
@@ -213,10 +213,9 @@ class LicenseWindow(ctk.CTkToplevel):
         if self.failed_attempts >= 5:
             remaining = int(self.lockout_time - datetime.now().timestamp())
             if remaining > 0:
-                messagebox.showwarning(
-                    "입력 제한",
-                    f"보안을 위해 잠시 입력이 제한되었습니다.\n{remaining}초 후 다시 시도해주세요.",
-                    parent=self
+                show_warning(
+                    self, "입력이 제한되었습니다",
+                    f"보안을 위해 잠시 입력이 제한되었습니다.\n{remaining}초 후 다시 시도해주세요."
                 )
                 return
             else:
@@ -226,14 +225,13 @@ class LicenseWindow(ctk.CTkToplevel):
         
         # 입력값 검증
         if not key:
-            messagebox.showwarning("입력 확인", "라이선스 키를 입력해주세요.", parent=self)
+            show_warning(self, "키를 입력해주세요", "발급받은 라이선스 키를 입력해주세요.")
             return
             
         if len(key) < 5:
-            messagebox.showwarning(
-                "입력 확인",
-                "유효하지 않은 라이선스 키 형식입니다.\n정확히 입력했는지 확인해주세요.",
-                parent=self
+            show_warning(
+                self, "키 형식을 확인해주세요",
+                "유효하지 않은 라이선스 키 형식입니다.\n정확히 입력했는지 확인해주세요."
             )
             return
         
@@ -281,7 +279,7 @@ class LicenseWindow(ctk.CTkToplevel):
             self.failed_attempts = 0  # 성공 시 카운터 초기화
 
             
-            messagebox.showinfo("성공", "인증되었습니다!\n이제 정상적으로 사용 가능합니다.", parent=self)
+            show_success(self, "인증되었습니다", "이제 정상적으로 사용할 수 있습니다.")
             
             # 메인 앱으로 진행
             self.on_success_callback()
@@ -296,16 +294,14 @@ class LicenseWindow(ctk.CTkToplevel):
             self.failed_attempts += 1
             if self.failed_attempts >= 5:
                 self.lockout_time = datetime.now().timestamp() + 60  # 60초 잠금
-                messagebox.showerror(
-                    "인증 실패",
-                    f"인증 실패: {result['message']}\n\n⚠️ 연속된 실패로 1분간 입력이 제한됩니다.",
-                    parent=self
+                show_error(
+                    self, "인증 실패",
+                    f"{result['message']}\n\n⚠️ 연속된 실패로 1분간 입력이 제한됩니다."
                 )
             else:
-                messagebox.showerror(
-                    "실패",
-                    f"인증 실패: {result['message']}\n(남은 시도 횟수: {5 - self.failed_attempts}회)",
-                    parent=self
+                show_error(
+                    self, "인증 실패",
+                    f"{result['message']}\n\n남은 시도 횟수: {5 - self.failed_attempts}회"
                 )
 
     def _handle_error(self, error_msg):
@@ -315,7 +311,7 @@ class LicenseWindow(ctk.CTkToplevel):
         self.key_entry.configure(state="normal")
         self.verify_btn.configure(state="normal")
         self.status_label.configure(text="상태: ⚠️ 오류 발생", text_color="#e74c3c")
-        messagebox.showerror("오류", f"인증 과정에서 오류가 발생했습니다.\n{error_msg}", parent=self)
+        show_error(self, "인증 오류", f"인증 과정에서 오류가 발생했습니다.\n{error_msg}")
 
     def _toggle_visibility(self):
         """라이선스 키 보이기/숨기기 토글"""
@@ -329,10 +325,10 @@ class LicenseWindow(ctk.CTkToplevel):
 
     def _on_close(self):
         """라이선스 인증 없이 창을 닫으면 프로그램 전체 종료"""
-        if messagebox.askyesno(
-            "종료",
-            "라이선스 인증을 완료해야 프로그램을 사용할 수 있습니다.\n종료하시겠습니까?",
-            parent=self
+        if ask_yes_no(
+            self, "프로그램을 종료할까요?",
+            "라이선스 인증을 완료해야 프로그램을 사용할 수 있습니다.",
+            yes_text="종료", no_text="계속 입력", danger=True
         ):
             self.destroy()
             try:

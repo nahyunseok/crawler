@@ -2,6 +2,7 @@ import time
 import os
 import random
 import re
+import hashlib
 import traceback
 from urllib.parse import urljoin, urlparse, urldefrag, urlunparse
 from urllib import robotparser
@@ -9,6 +10,7 @@ import undetected_chromedriver as uc
 from fake_useragent import UserAgent
 from bs4 import BeautifulSoup
 from src.utils.logger import get_logger
+from src.utils.config_manager import allowed_extensions
 
 # --- Monkeypatch for undetected_chromedriver shutdown error ---
 # ⛔ 수정금지(DO NOT MODIFY / DO NOT REMOVE — INTENDED)
@@ -36,15 +38,29 @@ LAZY_SRC_ATTRS = (
     'data-actualsrc', 'data-original-src', 'src',
 )
 
-# 링크 큐에 넣으면 안 되는 파일 확장자 (문서/압축/미디어 등)
+# 주소만 보고 '이미지 파일'로 판단할 수 있는 확장자 (화이트리스트 검사 대상)
+KNOWN_IMG_EXTS = ('.jpg', '.jpeg', '.png', '.webp', '.gif', '.svg', '.bmp')
+
+# 링크 큐에 넣으면 안 되는 파일 확장자 (문서/압축/미디어 + 이미지 자체)
+# ⛔ 이미지 확장자는 KNOWN_IMG_EXTS 를 재사용한다. 예전에는 양쪽에 따로 적어 두어
+#    한쪽에 확장자를 추가해도 다른 쪽은 그대로 남는 어긋남이 생길 수 있었다(DRY).
 NON_PAGE_EXTS = (
     '.pdf', '.zip', '.rar', '.7z', '.exe', '.dmg', '.hwp', '.doc', '.docx',
     '.xls', '.xlsx', '.ppt', '.pptx', '.mp3', '.mp4', '.avi', '.mov', '.mkv',
-    '.jpg', '.jpeg', '.png', '.gif', '.webp', '.svg', '.ico', '.css', '.js',
-)
-
-# 주소만 보고 '이미지 파일'로 판단할 수 있는 확장자 (화이트리스트 검사 대상)
-KNOWN_IMG_EXTS = ('.jpg', '.jpeg', '.png', '.webp', '.gif', '.svg', '.bmp')
+    '.ico', '.css', '.js',
+) + KNOWN_IMG_EXTS
+# 페이지 로딩 대기 시간의 하한(초). 사용자가 설정을 너무 짧게 줄여도 정상 페이지가 실패하지 않게 한다.
+MIN_PAGE_LOAD_TIMEOUT = 5
+# 스크롤 진행 상황을 몇 번마다 알릴지 (매번 알리면 로그가 같은 줄로 도배된다)
+SCROLL_LOG_INTERVAL = 10
+# 한 페이지에서 스크롤할 기본 최대 횟수 (무한 스크롤 페이지에서 영원히 내려가지 않도록)
+DEFAULT_MAX_SCROLLS = 250
+# 한 번의 수집에서 방문할 최대 페이지 수 (깊이 2단계 폭주 방지)
+# ⛔ 수정금지(DO NOT MODIFY / DO NOT REMOVE — INTENDED)
+# 왜: 깊이 2단계에서는 첫 페이지의 링크 개수만큼 페이지를 방문한다. 링크가 수백 개인
+#     사이트에서는 한 번 [수집 시작]을 누르면 몇 시간 동안 대상 서버에 요청이 계속 나갔다.
+#     상한이 없으면 사용자도 멈출 생각을 못 하고, 대상 사이트에는 과부하가 된다(전역수칙 9).
+MAX_PAGES_PER_CRAWL = 100
 
 # MIME 타입 → 확장자 (data URI 파일명 생성용)
 MIME_TO_EXT = {
@@ -78,6 +94,24 @@ class CrawlerEngine:
     # ──────────────────────────────────────────────────────────
     # 드라이버 준비
     # ──────────────────────────────────────────────────────────
+    def _page_load_timeout(self):
+        """
+        페이지 로딩 최대 대기 시간(초).
+
+        ⛔ 수정금지(DO NOT MODIFY — INTENDED): 숫자를 코드에 직접 적지 말고 설정에서 읽는다.
+        무엇: settings.json 의 timeout 값을 실제로 사용한다.
+        왜:   예전에는 set_page_load_timeout(30) 이 두 곳에 하드코딩되어 있었고,
+              timeout 설정은 아무도 읽지 않는 '죽은 설정'이었다. 느린 사이트를 위해
+              값을 늘려도 아무 일도 일어나지 않았다(매직넘버 중복 + 표시=동작 불일치).
+        건드리면: 설정 파일의 timeout 이 다시 장식용 숫자가 된다.
+        """
+        try:
+            value = int(self.config.get("timeout", 30))
+        except (TypeError, ValueError):
+            value = 30
+        # 너무 짧으면 정상 페이지도 실패하므로 하한을 둔다
+        return max(value, MIN_PAGE_LOAD_TIMEOUT)
+
     def setup_driver(self):
         """Initializes undetected-chromedriver."""
 
@@ -85,14 +119,35 @@ class CrawlerEngine:
             options = uc.ChromeOptions()
 
             # Headless mode
-            if self.config.get("headless", True):
+            # ⛔ 수정금지(DO NOT MODIFY — INTENDED): 수동 로그인과 화면 숨기기는 동시에 성립할 수 없다.
+            # 왜: 화면이 없으면 사용자가 로그인할 수 없는데, 프로그램은 로그인 대기 시간만 흘려보내고
+            #     비로그인 상태로 수집해 회원 전용 이미지를 전부 403 으로 실패시켰다.
+            #     UI 에서도 안내하지만, settings.json 을 직접 고치면 이 충돌 상태로 실행할 수 있다.
+            #     따라서 '실제로 브라우저를 만드는 이 지점'에서 최종적으로 막는다.
+            if self.config.get("manual_login", False):
+                if self.config.get("headless", True):
+                    self.logger.warning(
+                        "manual_login 이 켜져 있어 headless 를 무시합니다 "
+                        "(화면이 보이지 않으면 로그인을 할 수 없습니다)."
+                    )
+            elif self.config.get("headless", True):
                 options.add_argument("--headless=new")
 
             # Dynamic User-Agent
-            ua = UserAgent(os='windows', browsers=['chrome'])
-            random_ua = ua.random
-            self.logger.info(f"Using User-Agent: {random_ua}")
-            options.add_argument(f"user-agent={random_ua}")
+            # ⛔ 수정금지(DO NOT MODIFY — INTENDED): 설정값(user_agent_rotation)을 실제로 확인한다.
+            #    예전에는 이 설정을 아무도 읽지 않아, settings.json 에서 false 로 바꿔도
+            #    User-Agent 가 계속 무작위로 바뀌었다('죽은 설정' — 표시와 동작 불일치).
+            if self.config.get("user_agent_rotation", True):
+                try:
+                    ua = UserAgent(os='windows', browsers=['chrome'])
+                    random_ua = ua.random
+                    self.logger.info(f"Using User-Agent: {random_ua}")
+                    options.add_argument(f"user-agent={random_ua}")
+                except Exception as e:
+                    # UA 목록을 못 불러와도 수집 자체는 계속되어야 한다
+                    self.logger.warning(f"User-Agent rotation unavailable, using browser default: {e}")
+            else:
+                self.logger.info("User-Agent rotation disabled by settings.")
 
             # Performance/Stealth
             options.add_argument("--no-sandbox")
@@ -107,7 +162,7 @@ class CrawlerEngine:
             # Use undetected_chromedriver without needing standard webdriver_manager explicitly
             options = create_options()
             self.driver = uc.Chrome(options=options, use_subprocess=True)
-            self.driver.set_page_load_timeout(30)
+            self.driver.set_page_load_timeout(self._page_load_timeout())
             self.logger.info("WebDriver initialized successfully.")
         except Exception as e:
             error_msg = str(e)
@@ -123,7 +178,7 @@ class CrawlerEngine:
                     fallback_options = create_options()
                     self.driver = uc.Chrome(options=fallback_options, use_subprocess=True, driver_executable_path=driver_path)
 
-                    self.driver.set_page_load_timeout(30)
+                    self.driver.set_page_load_timeout(self._page_load_timeout())
                     self.logger.info("WebDriver initialized successfully via fallback driver manager.")
                 except Exception as e2:
                     self.logger.error(f"Failed to initialize WebDriver even with forced version: {e2}\n{traceback.format_exc()}")
@@ -233,6 +288,10 @@ class CrawlerEngine:
             if progress_callback: progress_callback("로그인 대기 완료. 데이터 수집을 시작합니다.")
 
         visited_urls = set()
+        # ⛔ 실제로 '불러온 페이지 수'를 센다. 링크 순회(깊이)와 페이지네이션 순회가
+        #    같은 예산을 나눠 쓰게 해야, 둘을 동시에 켰을 때 곱셈으로 폭주하지 않는다.
+        #    (예: 링크 100개 × 페이지네이션 30페이지 = 3,000회 요청)
+        self._pages_loaded = 0
         queue = [(self.normalize_link(start_url), 1)]  # (url, current_depth)
         all_images = []
         seen_image_keys = set()  # 페이지 간(전역) 중복 제거용
@@ -243,6 +302,19 @@ class CrawlerEngine:
             while queue:
                 if stop_event and stop_event.is_set():
                     self.logger.info("Crawl loop stopped by user.")
+                    break
+
+                # ⛔ 방문 상한 확인 (깊이 2단계 폭주 방지 — MAX_PAGES_PER_CRAWL 주석 참조)
+                if self._pages_loaded >= MAX_PAGES_PER_CRAWL:
+                    self.logger.warning(
+                        f"Reached page limit ({MAX_PAGES_PER_CRAWL}). Stopping to avoid overloading the site."
+                    )
+                    if progress_callback:
+                        progress_callback(
+                            f"⚠️ 방문 페이지 상한({MAX_PAGES_PER_CRAWL}개)에 도달해 수집을 마칩니다.\n"
+                            f"   → 대상 사이트에 과도한 부하를 주지 않기 위한 안전장치입니다.\n"
+                            f"   → 더 모으려면 시작 주소를 나눠서 여러 번 수집해주세요."
+                        )
                     break
 
                 current_url, current_depth = queue.pop(0)
@@ -326,7 +398,12 @@ class CrawlerEngine:
             page_index = 0
 
             while page_index < max_pages:
+                # 전체 예산을 넘기면 페이지네이션도 멈춘다 (깊이 × 페이지네이션 곱셈 폭주 방지)
+                if getattr(self, "_pages_loaded", 0) >= MAX_PAGES_PER_CRAWL:
+                    self.logger.warning("Page budget exhausted — stopping pagination.")
+                    break
                 page_index += 1
+                self._pages_loaded = getattr(self, "_pages_loaded", 0) + 1
 
                 # Smart Auto-Scroll (지연로딩 유도)
                 self.auto_scroll(progress_callback, stop_event)
@@ -347,7 +424,7 @@ class CrawlerEngine:
                 links.extend(self._extract_links(soup, url))
 
                 # 다음 페이지 버튼 클릭 시도
-                if not self._go_to_next_page(progress_callback):
+                if not self._go_to_next_page(progress_callback, stop_event):
                     break
                 if stop_event and stop_event.is_set():
                     break
@@ -378,12 +455,18 @@ class CrawlerEngine:
             self.logger.error(f"Invalid CSS Selector syntax '{target_selector}': {e}. Searching entire page instead.")
         return soup
 
-    def _go_to_next_page(self, callback=None):
+    def _go_to_next_page(self, callback=None, stop_event=None):
         """'다음 페이지' 버튼을 눌러 다음 목록으로 이동. 성공하면 True."""
         if not self.config.get("use_pagination"):
             return False
         selector = (self.config.get("pagination_selector") or "").strip()
         if not selector:
+            # ⛔ 침묵 실패 금지: 옵션은 켰는데 선택자가 없으면 순회가 조용히 1페이지에서 끝난다.
+            #    사용자는 '왜 다음 페이지를 안 넘어가지?' 하고 원인을 알 수 없었다.
+            self.logger.warning("Pagination enabled but selector is empty — staying on the first page.")
+            if callback:
+                callback("⚠️ '다음 페이지' 자동 클릭이 켜져 있지만 CSS 선택자가 비어 있어 "
+                         "첫 페이지만 수집합니다. ([접속 및 순회] 탭에서 선택자를 입력해주세요)")
             return False
 
         from selenium.webdriver.common.by import By
@@ -396,8 +479,9 @@ class CrawlerEngine:
             self.driver.execute_script("arguments[0].click();", btn)
             if callback:
                 callback("다음 페이지(Pagination)로 이동 중...")
-            time.sleep(delay_max * 2)  # 네트워크 로딩 대기
-            return True
+            # ⛔ 통째로 sleep 하지 않는다. 딜레이 5단계에서는 이 대기가 7초까지 늘어나,
+            #    중지 버튼을 눌러도 그 시간만큼 계속 요청이 나갔다.
+            return self._sleep_interruptible(delay_max * 2, stop_event)
         except Exception:
             self.logger.debug("Pagination button not found or not clickable.")
             return False
@@ -408,6 +492,9 @@ class CrawlerEngine:
     def _extract_images(self, search_area, url, page_title):
         """<img>, <source>, CSS 배경 이미지에서 수집 대상을 뽑아낸다."""
         images = []
+        # <picture> 안의 <img> 를 이미 담은 경우, 같은 <picture> 의 <source> 는 건너뛴다.
+        # (같은 사진을 webp/jpg 두 번 받는 중복을 막기 위함 — 아래 2) 참조)
+        covered_pictures = set()
 
         # --- 1) 일반 <img> 태그 ---
         for img in search_area.find_all('img'):
@@ -446,9 +533,21 @@ class CrawlerEngine:
             image_data = self._build_image_data(abs_url, description, context_text, heading_text, url, page_title)
             if self.has_include_keywords([image_data['description'], image_data['context'], image_data['heading']]):
                 images.append(image_data)
+                parent_picture = img.find_parent('picture')
+                if parent_picture is not None:
+                    covered_pictures.add(id(parent_picture))
 
         # --- 2) <picture><source> (Modern HTML) ---
         for src_tag in search_area.find_all('source'):
+            # ⛔ 수정금지(DO NOT MODIFY — INTENDED): 같은 <picture> 를 두 번 담지 않는다.
+            # 왜: <picture><source srcset="photo.webp"><img src="photo.jpg"></picture> 구조에서
+            #     <img> 와 <source> 를 각각 수집하면 '같은 사진'을 webp/jpg 로 두 번 내려받는다.
+            #     주소가 달라서 중복 제거에도 걸리지 않아, 결과 폴더에 동일한 사진이 2장씩 쌓였다.
+            #     <img> 는 모든 브라우저가 쓰는 기본 경로이므로 그쪽을 남기고 여기서 건너뛴다.
+            parent_picture = src_tag.find_parent('picture')
+            if parent_picture is not None and id(parent_picture) in covered_pictures:
+                continue
+
             srcset = src_tag.get('srcset') or src_tag.get('data-srcset')
             if not srcset:
                 continue
@@ -518,11 +617,30 @@ class CrawlerEngine:
         return unique
 
     def dedup_key(self, url):
-        """중복 판정용 키 (data URI 는 내용 앞부분으로 판정)."""
+        """
+        중복 판정용 키.
+
+        ⛔ 수정금지(DO NOT MODIFY — INTENDED)
+        무엇: 경로가 '이미지 파일 확장자'로 끝나면 쿼리스트링을 무시하고,
+              그렇지 않으면(동적 이미지 주소) 쿼리스트링까지 포함해서 구분한다.
+        왜:   예전에는 무조건 쿼리스트링을 버렸다. 그래서
+              · /photo.jpg?w=300 과 /photo.jpg?w=600 → 같은 파일 → 중복 처리 (여기까진 의도대로)
+              · /image.php?id=1 과 /image.php?id=2 → '서로 다른 이미지'인데 같은 키가 되어
+                첫 장만 받고 나머지를 전부 버렸다. CDN·이미지 프록시·게시판처럼 쿼리로
+                이미지를 구분하는 사이트에서는 수집 결과가 통째로 유실됐다.
+        건드리면: 동적 이미지 주소를 쓰는 사이트에서 조용히 이미지를 놓친다(v1.0.16의 그 사고와 동일 계열).
+        """
         if url.startswith('data:'):
             return url[:256]
         parsed = urlparse(url)
-        return f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+        base = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+
+        path_lower = parsed.path.lower()
+        if any(path_lower.endswith(ext) for ext in KNOWN_IMG_EXTS):
+            # 정적 이미지 파일 — 쿼리는 크기·캐시 파라미터일 뿐이므로 같은 이미지로 본다
+            return base
+        # 동적 이미지 주소(예: /img.php?id=2) — 쿼리가 다르면 다른 이미지다
+        return f"{base}?{parsed.query}" if parsed.query else base
 
     # ──────────────────────────────────────────────────────────
     # URL 유틸
@@ -633,13 +751,54 @@ class CrawlerEngine:
         # 전부 플레이스홀더처럼 보이면 첫 후보라도 반환 (오탐 대비)
         return candidates[0] if candidates else None
 
+    def _max_scrolls(self):
+        """
+        한 페이지에서 최대 몇 번까지 스크롤할지.
+
+        ⛔ 수정금지(DO NOT MODIFY — INTENDED): 설정값이 0 이하면 '자동'(기본 상한)으로 본다.
+        무엇: settings.json 의 max_scrolls 를 실제로 사용하되, 0 은 '제한 없음(자동)' 으로 읽는다.
+        왜:   ① 이 키는 오래전부터 설정 파일에 들어 있었지만 코드는 250 을 하드코딩해서
+                 아무 효과가 없는 '죽은 설정' 이었다(timeout 과 같은 문제).
+              ② 실제 사용자 설정 파일에는 max_scrolls 가 0 으로 들어 있었다. 이 값을 그대로
+                 '0번 스크롤' 로 해석하면 지연로딩(lazy-load) 이미지가 통째로 유실된다.
+                 그래서 0 이하는 반드시 '자동' 으로 해석해야 한다.
+        건드리면: 옛 설정 파일을 쓰는 사용자의 수집 결과가 갑자기 텅 비게 된다.
+        """
+        try:
+            value = int(self.config.get("max_scrolls", 0))
+        except (TypeError, ValueError):
+            value = 0
+        if value <= 0:
+            return DEFAULT_MAX_SCROLLS
+        return value
+
+    def _sleep_interruptible(self, seconds, stop_event=None, chunk=0.1):
+        """
+        중지 버튼에 반응하면서 기다린다. (계속 진행해도 되면 True, 중지되면 False)
+
+        ⛔ 수정금지(DO NOT MODIFY — INTENDED)
+        무엇: 긴 대기를 0.1초 단위로 쪼개고, 매 조각마다 중지 요청을 확인한다.
+        왜:   딜레이는 계정 정지·IP 차단을 막는 안전장치라 없앨 수 없다(전역수칙 6).
+              그래서 '기다리기'와 '중지에 반응하기'를 동시에 해야 한다.
+              예전에는 이 로직이 한 곳에만 있고 다른 대기 지점은 통째로 sleep 해서,
+              그 구간에서 중지 버튼이 먹지 않았다.
+        건드리면: 중지를 눌러도 프로그램이 몇 초씩 계속 요청을 보낸다.
+        """
+        remaining = max(float(seconds), 0.0)
+        while remaining > 0:
+            if stop_event and stop_event.is_set():
+                return False
+            time.sleep(min(chunk, remaining))
+            remaining -= chunk
+        return not (stop_event and stop_event.is_set())
+
     def auto_scroll(self, callback=None, stop_event=None):
         """Scrolls down to trigger lazy loading."""
         # Determine delay from config
         delay_min = self.config.get("random_delay_min", 1.0)
         delay_max = self.config.get("random_delay_max", 2.0)
 
-        max_scrolls = 250 # Limit to prevent infinite scrolling on malicious pages
+        max_scrolls = self._max_scrolls()
         scroll_count = 0
 
         while scroll_count < max_scrolls:
@@ -652,12 +811,8 @@ class CrawlerEngine:
 
             # Random delay for human-like behavior
             delay = random.uniform(delay_min, delay_max)
-            # Sleep in small chunks to react to stop button faster
-            chunks = max(int(delay * 10), 1)
-            for _ in range(chunks):
-                if stop_event and stop_event.is_set():
-                    return
-                time.sleep(0.1)
+            if not self._sleep_interruptible(delay, stop_event):
+                return
 
             # Check if reached bottom
             scroll_pos = self.driver.execute_script("return window.pageYOffset + window.innerHeight")
@@ -665,13 +820,19 @@ class CrawlerEngine:
 
             if scroll_pos >= new_height - 100:
                 # Give it one more generous wait at the bottom
-                time.sleep(delay_max)
+                # ⛔ 통째로 sleep 하지 않는다. 위쪽 스크롤 대기와 '같은 방식'으로 잘게 나눠 자며
+                #    중지 버튼에 즉시 반응해야 한다. (예전에는 이 한 줄에서만 중지가 먹지 않았다)
+                if not self._sleep_interruptible(delay_max, stop_event):
+                    return
                 final_height = self.driver.execute_script("return document.body.scrollHeight")
                 if final_height == new_height:
                     break
 
-            if callback:
-                callback("Scrolling... (로봇 방지 우회 진행 중)")
+            # ⛔ 로그 도배 금지: 예전에는 스크롤 한 번마다 같은 문구를 찍어서
+            #    긴 페이지에서는 실시간 로그가 똑같은 줄 수백 개로 가득 찼다.
+            #    (정작 중요한 안내가 위로 밀려 보이지 않게 된다)
+            if callback and scroll_count % SCROLL_LOG_INTERVAL == 0:
+                callback(f"페이지를 내리며 이미지를 불러오는 중... ({scroll_count}번째)")
 
     # ──────────────────────────────────────────────────────────
     # 필터
@@ -700,11 +861,9 @@ class CrawlerEngine:
                 return True
 
         # 2. Extension Filtering (Whitelist approach)
-        valid_exts = []
-        if self.config.get("ext_jpg", True): valid_exts.extend(['.jpg', '.jpeg'])
-        if self.config.get("ext_png", True): valid_exts.append('.png')
-        if self.config.get("ext_webp", True): valid_exts.append('.webp')
-        if self.config.get("ext_gif", False): valid_exts.append('.gif')
+        # ⛔ 목록은 config_manager.allowed_extensions() 한 곳에서만 만든다.
+        #    다운로더도 같은 함수를 써서 '실제 파일 포맷'을 검사한다(표시=동작 일치).
+        valid_exts = allowed_extensions(self.config)
 
         # ⛔ 수정금지(DO NOT MODIFY — INTENDED)
         # 무엇: valid_exts 가 비어 있어도(확장자 체크박스를 전부 해제) 화이트리스트 검사를 그대로 수행한다.
@@ -746,7 +905,12 @@ class CrawlerEngine:
         # basename() 을 쓰면 파일명이 수백 자가 되어 윈도우 경로 길이(260자)를 넘겨버린다.
         # → 짧은 고유 이름을 새로 만들어 준다.
         if url.startswith('data:'):
-            return f"embed_{abs(hash(url[:1024])) % 100000000:08d}"
+            # ⛔ 수정금지(DO NOT MODIFY — INTENDED): 파이썬 내장 hash() 를 쓰지 않는다.
+            # 왜: 문자열 hash() 는 실행할 때마다 값이 바뀐다(해시 시드 무작위화).
+            #     그래서 같은 이미지를 다시 수집하면 파일명이 매번 달라져, 결과를 비교하거나
+            #     재현할 수 없었다. hashlib 은 언제 어디서 돌려도 같은 값을 준다.
+            digest = hashlib.sha1(url[:1024].encode('utf-8', 'ignore')).hexdigest()
+            return f"embed_{digest[:8]}"
 
         path = urlparse(url).path
         filename = os.path.basename(path)

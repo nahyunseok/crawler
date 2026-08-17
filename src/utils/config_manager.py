@@ -50,6 +50,59 @@ def resolve_config_path(config_path=None):
         return os.path.join(primary, CONFIG_FILE_NAME)
 
 
+def resolve_data_dir(subdir_name):
+    """
+    사용자 데이터를 저장할 폴더를 정한다 (results 등).
+    1순위: 실행 폴더  2순위: 사용자 데이터 폴더 — 로거·설정과 동일한 전략이다.
+
+    ⛔ 수정금지(DO NOT MODIFY — INTENDED)
+    무엇: 설정·로그와 '같은 규칙'으로 쓰기 가능한 폴더를 찾는다.
+    왜:   예전에는 results 만 os.getcwd() 에 고정되어 있었다. 설정과 로그는 권한이 없으면
+          사용자 데이터 폴더로 대체되는데 results 만 대체되지 않아, 쓰기 권한 없는 위치
+          (예: Program Files, 네트워크 드라이브)에서 실행하면 수집 자체가 실패했다.
+    건드리면: 제한된 PC 에서 '수집은 되는데 저장이 안 되는' 문의가 다시 발생한다.
+    """
+    primary = os.path.join(os.getcwd(), subdir_name)
+    if _is_writable_dir(primary):
+        return primary
+    try:
+        from appdirs import user_data_dir
+        fallback = os.path.join(user_data_dir("GeminiImageCrawler", "User"), subdir_name)
+        os.makedirs(fallback, exist_ok=True)
+        return fallback
+    except Exception:
+        return primary
+
+
+# 확장자 체크박스(설정 키) → 실제 허용 확장자 목록
+# ⛔ 순서를 바꾸거나 항목을 늘릴 때는 UI 체크박스도 함께 고쳐야 한다.
+EXT_SETTING_MAP = (
+    ("ext_jpg", ('.jpg', '.jpeg')),
+    ("ext_png", ('.png',)),
+    ("ext_webp", ('.webp',)),
+    ("ext_gif", ('.gif',)),
+)
+
+
+def allowed_extensions(config_manager):
+    """
+    사용자가 UI에서 켜 둔 '허용 확장자' 목록을 반환한다. (예: ('.jpg', '.jpeg', '.png'))
+
+    ⛔ 수정금지(DO NOT MODIFY — INTENDED): 이 목록은 여기 '한 곳'에서만 만든다.
+    무엇: 크롤러(주소 기준 필터)와 다운로더(실제 파일 포맷 기준 필터)가 같은 함수를 쓴다.
+    왜:   예전에는 crawler_engine 안에서만 목록을 만들었고, 다운로더는 검사하지 않았다.
+          그래서 확장자가 없는 주소(예: /photo?id=1)는 화이트리스트를 그냥 통과한 뒤
+          PIL 이 판별한 실제 포맷으로 저장되어, GIF 체크를 껐는데도 .gif 가 저장됐다.
+          (화면 표시와 실제 동작이 어긋나는 대표적인 사고)
+    건드리면: 확장자 체크박스가 '주소에 확장자가 있는 경우에만' 동작하는 반쪽 필터로 되돌아간다.
+    """
+    exts = []
+    for key, values in EXT_SETTING_MAP:
+        if config_manager.get(key, key != "ext_gif"):   # GIF 만 기본 꺼짐
+            exts.extend(values)
+    return tuple(exts)
+
+
 def delay_bounds(delay_level):
     """
     UI의 '안전 딜레이' 단계(1~5) → 실제 요청 간격(최소, 최대)초.
@@ -91,6 +144,9 @@ class ConfigManager:
             "random_delay_min": 1.0,
             "random_delay_max": 2.0,
             "delay_level": 2,
+            # 한 페이지에서 스크롤할 최대 횟수. 0 = 자동(기본 상한까지)
+            # ⛔ 0 을 '스크롤 0번' 으로 해석하면 지연로딩 이미지가 전멸한다 — _max_scrolls() 참조
+            "max_scrolls": 0,
 
             # 수집 정책
             "respect_robots": True,            # robots.txt 준수 (전역수칙 9)
@@ -100,6 +156,12 @@ class ConfigManager:
             "use_pagination": False,
             "pagination_selector": "",
             "max_pagination_pages": 30,        # '다음 페이지' 최대 순회 수
+
+            # 수집 범위 — 예전에는 저장하지 않아 프로그램을 다시 켜면 매번 초기화됐다.
+            # (다른 설정은 다 기억하는데 이 두 개만 잊어버려 일관성이 없었다)
+            "use_scope": False,                # '특정 영역만 수집' 사용 여부
+            "scope_selector": "",              # 그 영역의 CSS 선택자
+            "crawl_depth": 1,                  # 1=현재 페이지만, 2=링크까지
         }
         self.config = self.load_config()
 
