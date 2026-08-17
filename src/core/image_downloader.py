@@ -97,6 +97,26 @@ class ImageDownloader:
                 pass
         return removed
 
+    def _remove_empty_result_dir(self, save_dir, img_save_dir):
+        """
+        한 장도 저장되지 않았으면 방금 만든 결과 폴더를 지운다.
+
+        ⛔ 수정금지(DO NOT MODIFY — INTENDED)
+        무엇: '이번 수집에서 만든' 빈 폴더만 지운다. 비어 있지 않으면 절대 건드리지 않는다.
+        왜:   결과 폴더는 다운로드를 시작하기 전에 미리 만든다. 그런데 필터 때문에 전부
+              걸러지면 빈 폴더가 그대로 남았다. 재수집을 반복하면 빈 폴더가 계속 쌓여
+              결과 폴더를 열었을 때 어느 것이 실제 결과인지 알 수 없었다(실측 확인).
+        건드리면: 사용자의 수집 결과를 실수로 지울 수 있다. 반드시 '비어 있을 때만' 지운다.
+        """
+        try:
+            for path in (img_save_dir, save_dir):
+                if os.path.isdir(path) and not os.listdir(path):
+                    os.rmdir(path)      # 비어 있지 않으면 OSError 가 나며 아무것도 지우지 않는다
+                    self.logger.info(f"Removed empty result folder: {path}")
+        except OSError as e:
+            # 폴더가 비어있지 않거나 잠겨 있으면 그냥 둔다 (데이터 보존이 우선)
+            self.logger.debug(f"Kept result folder ({e})")
+
     def _note_skip(self, reason):
         """
         이미지를 건너뛴 이유를 집계한다.
@@ -339,6 +359,7 @@ class ImageDownloader:
 
         if not downloaded_images:
             self.logger.warning("저장된 이미지가 없습니다. (필터 조건 또는 네트워크 확인 필요)")
+            self._remove_empty_result_dir(save_dir, img_save_dir)
             return None
 
         # Generate Excel Report

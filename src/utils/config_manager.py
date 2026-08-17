@@ -136,6 +136,9 @@ class ConfigManager:
             "exclude_keywords": "logo, icon, button, tracker, pixel, banner",
             "include_keywords": "",
             "max_image_mb": 20,                # 이미지 1장 최대 용량(MB) — 메모리 폭탄 방지
+            # 지도 타일처럼 기계적으로 생성되는 이미지 제외 (기본 켜짐)
+            # ⛔ 실측: 지도 타일 16장이 수집 결과 30장의 절반을 차지했다(파일명도 1031.png 처럼 무의미)
+            "exclude_map_tiles": True,
 
             # 브라우저 동작
             "headless": True,

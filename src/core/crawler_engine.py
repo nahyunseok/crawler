@@ -4,7 +4,7 @@ import random
 import re
 import hashlib
 import traceback
-from urllib.parse import urljoin, urlparse, urldefrag, urlunparse
+from urllib.parse import urljoin, urlparse, urldefrag, urlunparse, parse_qs
 from urllib import robotparser
 import undetected_chromedriver as uc
 # ⛔ fake_useragent 를 쓰지 않는다(DO NOT RE-ADD — INTENDED).
@@ -33,7 +33,21 @@ uc.Chrome.__del__ = patched_chrome_del
 
 # 이미지로 오인하기 쉬운 '플레이스홀더' 판별 키워드
 # (지연로딩 사이트는 src 에 투명 1x1 이미지를 넣고 진짜 주소는 data-src/srcset 에 둔다)
-PLACEHOLDER_HINTS = ('placeholder', 'blank.', 'spacer', 'loading', 'lazy-load', 'dummy', 'noimage', 'no_image')
+# ⛔ 'transparent' 는 실측으로 추가했다(hwangsil-eel.com 에서 1x1 투명 이미지를 실제로 내려받은 뒤
+#    크기 필터로 버렸다 — 미리 걸러 불필요한 요청을 아낀다).
+PLACEHOLDER_HINTS = (
+    'placeholder', 'blank.', 'spacer', 'loading', 'lazy-load', 'dummy',
+    'noimage', 'no_image', 'transparent', 'pixel.gif', '1x1',
+)
+
+# 이미지 최적화 프록시가 '원본 주소' 를 담아 두는 쿼리 파라미터 이름
+# (Next.js: url / Cloudinary·imgix 계열: src·image·file·path)
+PROXY_URL_PARAMS = ('url', 'src', 'image', 'file', 'path', 'img')
+
+# 콘텐츠가 아닌 '지도 타일' 등 기계적으로 생성되는 이미지 경로 조각
+# ⛔ 실측(hwangsil-eel.com): 수집 30장 중 16장이 카카오맵 타일이었다. 파일명도 1031.png 처럼
+#    의미가 없어 결과를 알아볼 수 없었다. 상품 사진을 원하는 사용자에게는 노이즈다.
+NON_CONTENT_PATH_HINTS = ('/tile/', '/tiles/', '/map/tile', 'maptile')
 
 # 이미지 주소가 들어있을 수 있는 속성들 (우선순위 순서 — 앞쪽이 '진짜'일 확률이 높다)
 LAZY_SRC_ATTRS = (
@@ -965,6 +979,16 @@ class CrawlerEngine:
             if kw in target:
                 return True
 
+        # 1-2. 콘텐츠가 아닌 기계 생성 이미지(지도 타일 등)
+        # ⛔ 수정금지(DO NOT MODIFY — INTENDED): 사용자가 끌 수 있게 설정으로 둔다(기본 제외).
+        # 왜: 실측에서 카카오맵 타일 16장이 수집 결과 30장의 절반을 차지했다. 파일명도
+        #     1031.png 처럼 의미가 없어 결과를 알아볼 수 없었다. 다만 지도를 일부러 모으는
+        #     경우도 있을 수 있으므로 '끌 수 있는' 기본값으로 만든다.
+        if self.config.get("exclude_map_tiles", True):
+            path_and_host = f"{parsed.netloc}{parsed.path}".lower()
+            if any(hint in path_and_host for hint in NON_CONTENT_PATH_HINTS):
+                return True
+
         # 2. Extension Filtering (Whitelist approach)
         # ⛔ 목록은 config_manager.allowed_extensions() 한 곳에서만 만든다.
         #    다운로더도 같은 함수를 써서 '실제 파일 포맷'을 검사한다(표시=동작 일치).
@@ -1000,6 +1024,35 @@ class CrawlerEngine:
 
         return False
 
+    def _stem_from_proxy_query(self, parsed):
+        """
+        이미지 최적화 프록시 주소의 쿼리에서 '원본 파일명' 을 꺼낸다. 없으면 None.
+
+        ⛔ 수정금지(DO NOT MODIFY / DO NOT REMOVE — INTENDED)
+        무엇: /_next/image?url=%2Fhero-eel-v3-brand.png 처럼 쿼리에 원본 경로가 담긴 주소에서
+              'hero-eel-v3-brand' 를 파일명으로 쓴다.
+        왜:   요즘 사이트는 대부분 이미지 최적화 프록시(Next.js·Cloudinary·imgix 등)를 쓴다.
+              그러면 경로는 늘 '/_next/image' 같은 고정값이라, basename 만 쓰면 수집한 파일이
+              전부 'image.webp' 가 되어 무엇이 무엇인지 구분할 수 없다.
+              실측(hwangsil-eel.com): 30장 중 12장이 모두 image.webp 였고, 정작 쿼리 안에는
+              hero-eel-v3-brand·category-soup-v2 같은 좋은 이름이 들어 있었다.
+        건드리면: 결과 폴더의 파일명이 다시 전부 같아져 결과를 보고도 알 수 없게 된다.
+        """
+        try:
+            params = parse_qs(parsed.query)
+        except Exception:
+            return None
+
+        for key in PROXY_URL_PARAMS:
+            for value in params.get(key, []):
+                # 값 자체가 URL 이거나 경로다 (이미 unquote 된 상태로 온다)
+                candidate = os.path.basename(urlparse(value).path or value)
+                stem = os.path.splitext(candidate)[0]
+                cleaned = re.sub(r'[^a-zA-Z0-9_\-]', '', stem)
+                if len(cleaned) >= 2:      # 'a' 같은 무의미한 한 글자는 쓰지 않는다
+                    return cleaned
+        return None
+
     def get_filename_from_url(self, url):
         """
         URL에서 파일명을 추출하고, 로깅/저장 시 문제가 없도록 정제한다.
@@ -1017,9 +1070,8 @@ class CrawlerEngine:
             digest = hashlib.sha1(url[:1024].encode('utf-8', 'ignore')).hexdigest()
             return f"embed_{digest[:8]}"
 
-        path = urlparse(url).path
-        filename = os.path.basename(path)
-        stem = os.path.splitext(filename)[0]
+        parsed = urlparse(url)
+        stem = self._stem_from_proxy_query(parsed) or os.path.splitext(os.path.basename(parsed.path))[0]
 
         # ⛔ 수정금지(INTENDED): 파일명에서 ASCII 외 문자를 제거한다.
         # 왜: 윈도우 콘솔(cp949) 로깅 시 latin-1/유니코드 인코딩 에러가 발생했었다.

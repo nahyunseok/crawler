@@ -5,6 +5,7 @@
 """
 import ast
 import inspect
+import os
 import re
 import textwrap
 
@@ -581,7 +582,122 @@ def test_긴_페이지에서_로그가_도배되지_않는다(tmp_path):
 
 
 # ──────────────────────────────────────────────────────────────
-# 11. 매뉴얼과 실제 동작이 일치하는지 (문서도 '표시=동작' 대상이다)
+# 11. 실사용 로그에서 드러난 문제들 (hwangsil-eel.com 2026-08-18)
+# ──────────────────────────────────────────────────────────────
+@pytest.mark.parametrize("주소, 기대_이름, 설명", [
+    # Next.js 이미지 최적화 프록시 — 경로는 늘 /_next/image 라서 basename 은 쓸 수 없다
+    ("https://a.com/_next/image?url=%2Fhero-eel-v3-brand.png&w=3840&q=75",
+     "hero-eel-v3-brand", "Next.js 프록시 (경로 인코딩)"),
+    ("https://a.com/_next/image?url=%2Fcategory-soup-v2.png&w=640",
+     "category-soup-v2", "Next.js 프록시 다른 이미지"),
+    # 외부 저장소를 감싼 경우
+    ("https://a.com/_next/image?url=https%3A%2F%2Fcdn.co%2Fstorage%2Fproduct-01.jpg&w=750",
+     "product-01", "프록시가 외부 URL 을 감싼 경우"),
+    # 다른 프록시 계열 파라미터
+    ("https://img.a.com/resize?src=/photos/sunset-view.jpg&w=800", "sunset-view", "src 파라미터"),
+    # 일반 주소는 기존대로 basename
+    ("https://a.com/photos/plain-name.jpg", "plain-name", "일반 이미지 주소"),
+])
+def test_프록시_주소에서_원본_파일명을_살린다(tmp_path, 주소, 기대_이름, 설명):
+    """
+    ⛔ 회귀 방지: 실측(hwangsil-eel.com)에서 수집 30장 중 12장이 모두 'image.webp' 였다.
+       요즘 사이트는 대부분 이미지 최적화 프록시를 쓰는데, 경로가 '/_next/image' 로 고정이라
+       basename 만 쓰면 결과 폴더에서 무엇이 무엇인지 구분할 수 없었다.
+       정작 쿼리 안에는 hero-eel-v3-brand 같은 좋은 이름이 들어 있었다.
+    """
+    e = _엔진(tmp_path)
+    assert e.get_filename_from_url(주소) == 기대_이름, 설명
+
+
+def test_쿼리에_쓸만한_이름이_없으면_기존_방식을_쓴다(tmp_path):
+    """짝 테스트 — 억지로 쿼리에서 이름을 뽑아 이상한 파일명을 만들지 않는다."""
+    e = _엔진(tmp_path)
+    assert e.get_filename_from_url("https://a.com/real-name.jpg?w=100&q=75") == "real-name"
+
+
+@pytest.mark.parametrize("주소, 제외되어야_하나, 설명", [
+    ("https://mts.daumcdn.net/api/v1/tile/PNGSD02/v22/latest/3/1456/1031.png", True, "카카오맵 타일"),
+    ("https://map.example.com/tiles/5/10/20.png", True, "일반 지도 타일"),
+    ("https://a.com/products/eel-grilled.jpg", False, "일반 상품 사진"),
+    ("https://a.com/subtitle/photo.jpg", False, "'tile' 이 단어 일부인 정상 경로"),
+])
+def test_지도_타일은_기본으로_제외한다(tmp_path, 주소, 제외되어야_하나, 설명):
+    """
+    ⛔ 회귀 방지: 실측에서 수집 30장 중 16장이 카카오맵 타일이었다. 파일명도 1031.png 처럼
+       의미가 없어 결과를 알아볼 수 없었다(상품 사진을 원하는 사용자에게는 노이즈).
+    """
+    e = _엔진(tmp_path)
+    assert e.is_excluded(주소) is 제외되어야_하나, 설명
+
+
+def test_지도_타일_제외는_끌_수_있다(tmp_path):
+    """지도를 일부러 모으는 경우도 있으므로 설정으로 끌 수 있어야 한다."""
+    e = _엔진(tmp_path, exclude_map_tiles=False)
+    assert e.is_excluded("https://mts.daumcdn.net/api/v1/tile/x/3/1456/1031.png") is False
+
+
+@pytest.mark.parametrize("주소", [
+    "https://a.com/img/transparent.gif",
+    "https://a.com/img/1x1.png",
+    "https://a.com/assets/pixel.gif",
+])
+def test_투명_플레이스홀더는_내려받기_전에_걸러낸다(tmp_path, 주소):
+    """⛔ 실측에서 1x1 투명 이미지를 실제로 내려받은 뒤 크기 필터로 버렸다(불필요한 요청)."""
+    e = _엔진(tmp_path)
+    assert e.is_placeholder(주소) is True
+
+
+def test_한_장도_저장되지_않으면_빈_폴더를_남기지_않는다(tmp_path):
+    """
+    ⛔ 회귀 방지: 결과 폴더는 다운로드 전에 미리 만든다. 필터로 전부 걸러지면 빈 폴더가
+       그대로 남아, 재수집을 반복할 때 어느 것이 실제 결과인지 알 수 없었다(실측 확인).
+    """
+    import base64, io
+    from PIL import Image as PILImage
+
+    cfg = ConfigManager(config_path=str(tmp_path / "config" / "settings.json"))
+    cfg.set_many({"min_width": 9999, "min_height": 9999})   # 전부 걸러지게 한다
+    dl = ImageDownloader(cfg)
+
+    buf = io.BytesIO()
+    PILImage.new("RGB", (120, 120), (5, 5, 5)).save(buf, format="PNG")
+    이미지 = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
+
+    결과폴더 = tmp_path / "results"
+    반환 = dl.process_images(
+        [{"src": 이미지, "filename": "x", "source_page": "https://a.com/p", "page_title": "T"}],
+        base_result_dir=str(결과폴더),
+    )
+
+    assert 반환 is None
+    남은_폴더 = [d for d in os.listdir(결과폴더) if d != ".history"] if 결과폴더.exists() else []
+    assert not 남은_폴더, f"빈 결과 폴더가 남았다: {남은_폴더}"
+
+
+def test_저장된_이미지가_있으면_폴더를_절대_지우지_않는다(tmp_path):
+    """짝 테스트 — 데이터 보존이 우선이다. 비어 있지 않은 폴더는 건드리지 않는다."""
+    import base64, io
+    from PIL import Image as PILImage
+
+    cfg = ConfigManager(config_path=str(tmp_path / "config" / "settings.json"))
+    cfg.set_many({"min_width": 0, "min_height": 0})
+    dl = ImageDownloader(cfg)
+
+    buf = io.BytesIO()
+    PILImage.new("RGB", (120, 120), (5, 5, 5)).save(buf, format="PNG")
+    이미지 = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
+
+    저장폴더 = dl.process_images(
+        [{"src": 이미지, "filename": "x", "source_page": "https://a.com/p", "page_title": "T"}],
+        base_result_dir=str(tmp_path / "results"),
+    )
+
+    assert 저장폴더 is not None and os.path.isdir(저장폴더)
+    assert os.listdir(os.path.join(저장폴더, "images")), "저장된 파일이 사라졌다"
+
+
+# ──────────────────────────────────────────────────────────────
+# 12. 매뉴얼과 실제 동작이 일치하는지 (문서도 '표시=동작' 대상이다)
 # ──────────────────────────────────────────────────────────────
 def _매뉴얼():
     return open("MANUAL.md", encoding="utf-8").read()
