@@ -149,6 +149,39 @@ def test_페이지순회_선택자가_비면_사용자에게_알린다(tmp_path)
     assert "선택자" in 받은_메시지[0]
 
 
+@pytest.mark.parametrize("선택자, 기대_문구, 설명", [
+    ("#nope", "찾지 못해", "페이지에 없는 선택자"),
+    ("#$$>>[[", "문법", "문법이 틀린 선택자"),
+])
+def test_영역_선택자가_안_맞으면_화면에_알린다(tmp_path, 선택자, 기대_문구, 설명):
+    """
+    ⛔ 회귀 방지: 선택자를 못 찾으면 페이지 전체를 수집하게 되는데, 예전에는 그 사실을
+       로그 파일에만 남겼다. 사용자는 영역 제한이 걸린 줄 알고 결과를 신뢰했다.
+    """
+    e = _엔진(tmp_path)
+    soup = BeautifulSoup("<div id='real'><img src='/a.jpg'></div>", "html.parser")
+    받은_메시지 = []
+
+    결과 = e._resolve_search_area(soup, 선택자, 받은_메시지.append)
+
+    assert 결과 is soup, f"{설명}: 못 찾았으면 페이지 전체를 대상으로 삼아야 한다"
+    assert 받은_메시지, f"{설명}: 아무 안내도 하지 않았다"
+    assert 기대_문구 in 받은_메시지[0], f"{설명}: 안내가 구체적이지 않다 — {받은_메시지[0]}"
+
+
+def test_영역_선택자가_맞으면_그_영역만_대상으로_한다(tmp_path):
+    """짝 테스트 — 정상일 때는 경고 없이 지정 영역만 쓴다."""
+    e = _엔진(tmp_path)
+    soup = BeautifulSoup("<div id='real'><img src='/a.jpg'></div><img src='/b.jpg'>", "html.parser")
+    받은_메시지 = []
+
+    결과 = e._resolve_search_area(soup, "#real", 받은_메시지.append)
+
+    assert 결과 is not soup, "지정 영역이 아니라 전체를 돌려줬다"
+    assert 결과.get("id") == "real"
+    assert not 받은_메시지, f"정상인데 경고를 띄웠다: {받은_메시지}"
+
+
 def test_수집범위_선택자가_비면_사용자에게_알린다():
     """⛔ 회귀 방지: 영역 제한이 걸린 줄 알았는데 조용히 페이지 전체를 수집했다."""
     from src.ui import main_window
@@ -381,6 +414,49 @@ def test_설정파일에_죽은_키가_남아있지_않다():
 def test_페이지_로딩_대기시간_하한이_지켜진다(tmp_path):
     e = _엔진(tmp_path, timeout=1)
     assert e._page_load_timeout() == MIN_PAGE_LOAD_TIMEOUT
+
+
+# ──────────────────────────────────────────────────────────────
+# 10. 매뉴얼과 실제 동작이 일치하는지 (문서도 '표시=동작' 대상이다)
+# ──────────────────────────────────────────────────────────────
+def _매뉴얼():
+    return open("MANUAL.md", encoding="utf-8").read()
+
+
+@pytest.mark.parametrize("문구", [
+    "일반 설정", "필터 및 고급", "접속 및 순회",
+])
+def test_매뉴얼의_탭_이름이_화면과_같다(문구):
+    """⛔ 회귀 방지: 탭 이름을 바꿨는데 매뉴얼이 옛 이름을 안내하면 고객이 찾지 못한다."""
+    from src.ui import main_window
+
+    화면_소스 = _코드만(main_window.MainWindow.create_widgets)
+    assert f'add("{문구}")' in 화면_소스, f"화면에 '{문구}' 탭이 없다"
+    assert 문구 in _매뉴얼(), f"매뉴얼에 '{문구}' 탭 설명이 없다"
+
+
+def test_매뉴얼이_없어진_버튼을_안내하지_않는다():
+    """⛔ 회귀 방지: 제거한 '이어받기 기록 초기화' 버튼을 매뉴얼이 안내하면 고객이 찾다가 문의한다."""
+    assert "이어받기 기록 초기화" not in _매뉴얼()
+
+
+def test_매뉴얼에_적힌_기본값이_실제_기본값과_같다(tmp_path):
+    """⛔ 회귀 방지: 기본값을 바꿨는데 매뉴얼만 옛 숫자를 유지하면 문서가 거짓말을 한다."""
+    cfg = ConfigManager(config_path=str(tmp_path / "config" / "settings.json"))
+    본문 = _매뉴얼()
+
+    assert f"기본 {cfg.get('max_pagination_pages')}" in 본문, "최대 순회 기본값이 매뉴얼과 다르다"
+    assert f"기본 {cfg.get('login_wait')}초" in 본문, "로그인 대기 기본값이 매뉴얼과 다르다"
+    assert str(MAX_PAGES_PER_CRAWL) in 본문, "방문 페이지 상한이 매뉴얼에 없다"
+
+
+def test_매뉴얼의_딜레이_예시가_실제_계산과_같다():
+    """매뉴얼은 '2단계 · 요청 간격 1.0~2.0초' 를 예로 든다 — 실제 공식과 맞아야 한다."""
+    from src.utils.config_manager import delay_bounds
+
+    최소, 최대 = delay_bounds(2)
+    assert f"{최소:.1f}~{최대:.1f}초" in _매뉴얼(), \
+        f"매뉴얼의 딜레이 예시가 실제 계산({최소}~{최대}초)과 다르다"
 
 
 def test_제외키워드는_호스트명에_적용되지_않는다(tmp_path):

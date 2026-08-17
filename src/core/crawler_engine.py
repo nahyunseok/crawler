@@ -419,7 +419,10 @@ class CrawlerEngine:
                 if soup.title and soup.title.string:
                     page_title = soup.title.string.strip()
 
-                search_area = self._resolve_search_area(soup, target_selector)
+                # 첫 페이지에서만 안내한다(페이지네이션마다 같은 경고를 반복하면 로그가 도배된다)
+                search_area = self._resolve_search_area(
+                    soup, target_selector, progress_callback if page_index == 1 else None
+                )
                 images.extend(self._extract_images(search_area, url, page_title))
                 links.extend(self._extract_links(soup, url))
 
@@ -440,8 +443,14 @@ class CrawlerEngine:
             # 지금까지 모은 것이라도 반환한다 (전량 손실 방지)
             return self._dedup_images(images), links
 
-    def _resolve_search_area(self, soup, target_selector):
-        """'특정 영역만 수집' 옵션이 켜진 경우 해당 영역만 반환한다."""
+    def _resolve_search_area(self, soup, target_selector, callback=None):
+        """
+        '특정 영역만 수집' 옵션이 켜진 경우 해당 영역만 반환한다.
+
+        ⛔ 침묵 실패 금지: 선택자가 페이지에 없거나 문법이 틀렸을 때는 페이지 전체를 수집하게 되는데,
+           사용자는 영역 제한이 걸린 줄 알고 있다. 그래서 로그 파일에만 남기지 않고
+           화면 로그에도 반드시 알린다(무엇이 잘못됐는지 알아야 선택자를 고칠 수 있다).
+        """
         if not target_selector:
             return soup
         self.logger.info(f"Scoping search to: {target_selector}")
@@ -451,8 +460,14 @@ class CrawlerEngine:
                 self.logger.info("Target section found.")
                 return selected_area
             self.logger.warning(f"Target selector '{target_selector}' not found. Searching entire page.")
+            if callback:
+                callback(f"⚠️ 지정한 영역 '{target_selector}' 을 페이지에서 찾지 못해 "
+                         f"페이지 전체를 수집합니다. (선택자를 다시 확인해주세요)")
         except Exception as e:
             self.logger.error(f"Invalid CSS Selector syntax '{target_selector}': {e}. Searching entire page instead.")
+            if callback:
+                callback(f"⚠️ 영역 선택자 '{target_selector}' 의 문법이 올바르지 않아 "
+                         f"페이지 전체를 수집합니다. (예: #content, .gallery-grid)")
         return soup
 
     def _go_to_next_page(self, callback=None, stop_event=None):
